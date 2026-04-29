@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
     thread,
@@ -10,9 +10,10 @@ use crate::Cli;
 
 const FD_SLOTS: usize = 2;
 const WORKERS: usize = 2;
-const FILES: &[FileId] = &[FileId::A, FileId::B];
+const FILES: &[FileId] = &[FileId::A, FileId::B, FileId::C];
+const SNAPSHOT_FILES: &[FileId] = &[FileId::A, FileId::B];
 const REPORT_MAGIC: &[u8; 8] = b"FSXORB1\0";
-const REPORT_VERSION: u32 = 1;
+const REPORT_VERSION: u32 = 2;
 const STDERR_MARKER: &[u8; 77] =
     b"FSX_ORACLE_STDERR_MARKER_77_BYTES_DO_NOT_BELONG_IN_DATA_FILES_1234567890!!!!!";
 const MAX_REPORT_MISMATCHES: usize = 20;
@@ -34,7 +35,10 @@ impl FileId {
     }
 
     fn path(self, root: &Path) -> PathBuf {
-        root.join(self.name())
+        match self {
+            FileId::A | FileId::B => root.join(self.name()),
+            FileId::C => tmp_file_path(root),
+        }
     }
 
     fn tag(self) -> u8 {
@@ -53,12 +57,18 @@ impl FileId {
             _ => Err(format!("invalid file id tag {tag}")),
         }
     }
+
+    fn snapshotted(self) -> bool {
+        SNAPSHOT_FILES.contains(&self)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OpenMode {
     ReadWriteCreate,
     AppendCreate,
+    ReadWriteTruncate,
+    ReadWriteCreateNew,
 }
 
 impl OpenMode {
@@ -66,6 +76,8 @@ impl OpenMode {
         match self {
             OpenMode::ReadWriteCreate => "read_write_create",
             OpenMode::AppendCreate => "append_create",
+            OpenMode::ReadWriteTruncate => "read_write_truncate",
+            OpenMode::ReadWriteCreateNew => "read_write_create_new",
         }
     }
 
@@ -73,6 +85,8 @@ impl OpenMode {
         match self {
             OpenMode::ReadWriteCreate => 0,
             OpenMode::AppendCreate => 1,
+            OpenMode::ReadWriteTruncate => 2,
+            OpenMode::ReadWriteCreateNew => 3,
         }
     }
 
@@ -80,6 +94,8 @@ impl OpenMode {
         match tag {
             0 => Ok(OpenMode::ReadWriteCreate),
             1 => Ok(OpenMode::AppendCreate),
+            2 => Ok(OpenMode::ReadWriteTruncate),
+            3 => Ok(OpenMode::ReadWriteCreateNew),
             _ => Err(format!("invalid open mode tag {tag}")),
         }
     }
@@ -89,6 +105,7 @@ impl OpenMode {
 enum WritePayload {
     ZeroBytes,
     Bytes32,
+    Bytes4K,
     Bytes32K,
 }
 
@@ -97,6 +114,7 @@ impl WritePayload {
         match self {
             WritePayload::ZeroBytes => "zero_bytes",
             WritePayload::Bytes32 => "32_bytes",
+            WritePayload::Bytes4K => "4_kb",
             WritePayload::Bytes32K => "32_kb",
         }
     }
@@ -105,6 +123,7 @@ impl WritePayload {
         match self {
             WritePayload::ZeroBytes => 0,
             WritePayload::Bytes32 => 32,
+            WritePayload::Bytes4K => 4 * 1024,
             WritePayload::Bytes32K => 32 * 1024,
         }
     }
@@ -113,7 +132,8 @@ impl WritePayload {
         match self {
             WritePayload::ZeroBytes => 0,
             WritePayload::Bytes32 => 1,
-            WritePayload::Bytes32K => 2,
+            WritePayload::Bytes4K => 2,
+            WritePayload::Bytes32K => 3,
         }
     }
 
@@ -121,7 +141,8 @@ impl WritePayload {
         match tag {
             0 => Ok(WritePayload::ZeroBytes),
             1 => Ok(WritePayload::Bytes32),
-            2 => Ok(WritePayload::Bytes32K),
+            2 => Ok(WritePayload::Bytes4K),
+            3 => Ok(WritePayload::Bytes32K),
             _ => Err(format!("invalid write payload tag {tag}")),
         }
     }
@@ -129,32 +150,72 @@ impl WritePayload {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReadSize {
+    ZeroBytes,
     Bytes32,
+    Bytes4K,
 }
 
 impl ReadSize {
     fn name(self) -> &'static str {
         match self {
+            ReadSize::ZeroBytes => "zero_bytes",
             ReadSize::Bytes32 => "32_bytes",
+            ReadSize::Bytes4K => "4_kb",
         }
     }
 
     fn len(self) -> usize {
         match self {
+            ReadSize::ZeroBytes => 0,
             ReadSize::Bytes32 => 32,
+            ReadSize::Bytes4K => 4 * 1024,
         }
     }
 
     fn tag(self) -> u8 {
         match self {
-            ReadSize::Bytes32 => 0,
+            ReadSize::ZeroBytes => 0,
+            ReadSize::Bytes32 => 1,
+            ReadSize::Bytes4K => 2,
         }
     }
 
     fn from_tag(tag: u8) -> Result<Self, String> {
         match tag {
-            0 => Ok(ReadSize::Bytes32),
+            0 => Ok(ReadSize::ZeroBytes),
+            1 => Ok(ReadSize::Bytes32),
+            2 => Ok(ReadSize::Bytes4K),
             _ => Err(format!("invalid read size tag {tag}")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeekTarget {
+    Start,
+    End,
+}
+
+impl SeekTarget {
+    fn name(self) -> &'static str {
+        match self {
+            SeekTarget::Start => "start",
+            SeekTarget::End => "end",
+        }
+    }
+
+    fn tag(self) -> u8 {
+        match self {
+            SeekTarget::Start => 0,
+            SeekTarget::End => 1,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, String> {
+        match tag {
+            0 => Ok(SeekTarget::Start),
+            1 => Ok(SeekTarget::End),
+            _ => Err(format!("invalid seek target tag {tag}")),
         }
     }
 }
@@ -165,18 +226,49 @@ enum OpSpec {
     Close,
     Write(WritePayload),
     Read(ReadSize),
+    Seek(SeekTarget),
+    Fstat,
+    Stat,
+    ReadDir,
     WriteStderr,
     Delete,
 }
 
 impl OpSpec {
     fn needs_file(self) -> bool {
-        matches!(self, OpSpec::Open(_) | OpSpec::Delete)
+        matches!(self, OpSpec::Open(_) | OpSpec::Delete | OpSpec::Stat)
     }
 
     fn needs_fd(self) -> bool {
-        !matches!(self, OpSpec::WriteStderr | OpSpec::Delete)
+        !matches!(
+            self,
+            OpSpec::WriteStderr | OpSpec::Delete | OpSpec::Stat | OpSpec::ReadDir
+        )
     }
+}
+
+fn op_catalog() -> &'static [OpSpec] {
+    &[
+        OpSpec::Open(OpenMode::ReadWriteCreate),
+        OpSpec::Open(OpenMode::AppendCreate),
+        OpSpec::Open(OpenMode::ReadWriteTruncate),
+        OpSpec::Open(OpenMode::ReadWriteCreateNew),
+        OpSpec::Close,
+        OpSpec::Write(WritePayload::ZeroBytes),
+        OpSpec::Write(WritePayload::Bytes32),
+        OpSpec::Write(WritePayload::Bytes4K),
+        OpSpec::Write(WritePayload::Bytes32K),
+        OpSpec::Read(ReadSize::ZeroBytes),
+        OpSpec::Read(ReadSize::Bytes32),
+        OpSpec::Read(ReadSize::Bytes4K),
+        OpSpec::Seek(SeekTarget::Start),
+        OpSpec::Seek(SeekTarget::End),
+        OpSpec::Fstat,
+        OpSpec::Stat,
+        OpSpec::ReadDir,
+        OpSpec::WriteStderr,
+        OpSpec::Delete,
+    ]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,6 +289,17 @@ enum Op {
         slot: usize,
         size: ReadSize,
     },
+    Seek {
+        slot: usize,
+        target: SeekTarget,
+    },
+    Fstat {
+        slot: usize,
+    },
+    Stat {
+        file: FileId,
+    },
+    ReadDir,
     WriteStderr,
     Delete {
         file: FileId,
@@ -231,6 +334,20 @@ impl Op {
                 write_u8(w, 5)?;
                 write_u8(w, file.tag())
             }
+            Op::Seek { slot, target } => {
+                write_u8(w, 6)?;
+                write_u32(w, *slot as u32)?;
+                write_u8(w, target.tag())
+            }
+            Op::Fstat { slot } => {
+                write_u8(w, 7)?;
+                write_u32(w, *slot as u32)
+            }
+            Op::Stat { file } => {
+                write_u8(w, 8)?;
+                write_u8(w, file.tag())
+            }
+            Op::ReadDir => write_u8(w, 9),
         }
     }
 
@@ -256,6 +373,17 @@ impl Op {
             5 => Ok(Op::Delete {
                 file: FileId::from_tag(read_u8(r)?)?,
             }),
+            6 => Ok(Op::Seek {
+                slot: read_u32(r)? as usize,
+                target: SeekTarget::from_tag(read_u8(r)?)?,
+            }),
+            7 => Ok(Op::Fstat {
+                slot: read_u32(r)? as usize,
+            }),
+            8 => Ok(Op::Stat {
+                file: FileId::from_tag(read_u8(r)?)?,
+            }),
+            9 => Ok(Op::ReadDir),
             tag => Err(format!("invalid op tag {tag}")),
         }
     }
@@ -270,6 +398,10 @@ impl Op {
             Op::Read { slot, size } => format!("read(h{}, {})", slot + 1, size.name()),
             Op::WriteStderr => "write_stderr(77-byte-marker)".to_owned(),
             Op::Delete { file } => format!("delete({})", file.name()),
+            Op::Seek { slot, target } => format!("seek(h{}, {})", slot + 1, target.name()),
+            Op::Fstat { slot } => format!("fstat(h{})", slot + 1),
+            Op::Stat { file } => format!("stat({})", file.name()),
+            Op::ReadDir => "read_dir(case_dir)".to_owned(),
         }
     }
 }
@@ -287,7 +419,7 @@ struct WorkerState {
 
 struct Job {
     op: Op,
-    case_root: PathBuf,
+    case_root: Arc<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -419,16 +551,6 @@ enum WorkerMessage {
     Stop,
 }
 
-struct ScheduledStep {
-    worker: usize,
-    op: Op,
-}
-
-struct Schedule {
-    mask: usize,
-    steps: Vec<ScheduledStep>,
-}
-
 struct ChainGenerator {
     templates: Vec<Op>,
 }
@@ -476,20 +598,17 @@ impl Scheduler {
         }
     }
 
-    fn schedule(&self, chain: &[Op], mask: usize) -> Schedule {
+    fn workers<'a>(&'a self, chain_len: usize, mask: usize) -> impl Iterator<Item = usize> + 'a {
         let mut remaining = mask;
-        let mut steps = Vec::with_capacity(chain.len());
-        for (idx, op) in chain.iter().enumerate() {
-            let worker = if idx == 0 {
+        (0..chain_len).map(move |idx| {
+            if idx == 0 {
                 0
             } else {
                 let worker = remaining % self.worker_count;
                 remaining /= self.worker_count;
                 worker
-            };
-            steps.push(ScheduledStep { worker, op: *op });
-        }
-        Schedule { mask, steps }
+            }
+        })
     }
 }
 
@@ -609,20 +728,27 @@ impl WorkerPool {
 
     fn run_case(
         &self,
-        case_root: &Path,
-        schedule: &Schedule,
+        case_root: Arc<PathBuf>,
+        chain: &[Op],
+        scheduler: &Scheduler,
+        mask: usize,
         report: &mut ReportWriter,
     ) -> Result<(), String> {
-        for (idx, step) in schedule.steps.iter().enumerate() {
-            report.step(idx + 1, step.worker, step.op)?;
-            self.senders[step.worker]
+        for (idx, (op, worker)) in chain
+            .iter()
+            .copied()
+            .zip(scheduler.workers(chain.len(), mask))
+            .enumerate()
+        {
+            report.step(idx + 1, worker, op)?;
+            self.senders[worker]
                 .send(WorkerMessage::Run(Job {
-                    op: step.op,
-                    case_root: case_root.to_path_buf(),
+                    op,
+                    case_root: Arc::clone(&case_root),
                 }))
                 .map_err(|e| e.to_string())?;
             let reply = self.reply_rx.recv().map_err(|e| e.to_string())?;
-            report.result(idx + 1, step.worker, &reply.result)?;
+            report.result(idx + 1, worker, &reply.result)?;
         }
 
         Ok(())
@@ -712,16 +838,23 @@ fn run_suite(root: &Path, len: usize, output: &Path) -> Result<(), String> {
     let mut case_id = 0usize;
     for chain in chains {
         for mask in 0usize..scheduler.schedule_count(chain.len()) {
-            let schedule = scheduler.schedule(&chain, mask);
             case_id += 1;
             let case_name = format!("case-{case_id:06}");
             let case_root = root.join(&case_name);
             fs::create_dir_all(&case_root)
                 .map_err(|e| format!("failed to create {}: {e}", case_root.display()))?;
-            report.case(case_id, schedule.mask)?;
+            report.case(case_id, mask)?;
             runner.reset_state();
-            runner.run_case(&case_root, &schedule, &mut report)?;
+            runner.run_case(
+                Arc::new(case_root.clone()),
+                &chain,
+                &scheduler,
+                mask,
+                &mut report,
+            )?;
             snapshot(&case_root, case_id, &case_name, &mut report)?;
+            runner.reset_state();
+            cleanup_tmp_files(&case_root)?;
         }
     }
 
@@ -794,6 +927,45 @@ fn execute_job(worker: usize, state: &Arc<Mutex<State>>, job: Job) -> Reply {
                 Err(e) => OpResult::err(errcode(&e)),
             }
         }
+        Op::Seek { slot, target } => {
+            let mut state = state.lock().unwrap();
+            let Some(file) = state.workers[worker].slots[slot].as_mut() else {
+                return Reply {
+                    result: OpResult::err(OracleErr::BadFd),
+                };
+            };
+            let seek_from = match target {
+                SeekTarget::Start => SeekFrom::Start(0),
+                SeekTarget::End => SeekFrom::End(0),
+            };
+            match file.seek(seek_from) {
+                Ok(pos) => OpResult::ok(pos as i64),
+                Err(e) => OpResult::err(errcode(&e)),
+            }
+        }
+        Op::Fstat { slot } => {
+            let state = state.lock().unwrap();
+            let Some(file) = state.workers[worker].slots[slot].as_ref() else {
+                return Reply {
+                    result: OpResult::err(OracleErr::BadFd),
+                };
+            };
+            match file.metadata() {
+                Ok(metadata) => OpResult::ok(metadata.len() as i64),
+                Err(e) => OpResult::err(errcode(&e)),
+            }
+        }
+        Op::Stat { file } => {
+            let path = file.path(&job.case_root);
+            match fs::metadata(&path) {
+                Ok(metadata) => OpResult::ok(metadata.len() as i64),
+                Err(e) => OpResult::err(errcode(&e)),
+            }
+        }
+        Op::ReadDir => match read_dir_listing(&job.case_root) {
+            Ok(listing) => OpResult::ok_data(listing.len() as i64, listing),
+            Err(e) => OpResult::err(errcode(&e)),
+        },
     };
 
     Reply { result }
@@ -810,6 +982,17 @@ fn open_file(path: &Path, mode: OpenMode) -> std::io::Result<File> {
             .read(true)
             .append(true)
             .create(true)
+            .open(path),
+        OpenMode::ReadWriteTruncate => OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path),
+        OpenMode::ReadWriteCreateNew => OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
             .open(path),
     }
 }
@@ -838,20 +1021,6 @@ fn concrete_ops() -> Vec<Op> {
     ops
 }
 
-fn op_catalog() -> &'static [OpSpec] {
-    &[
-        OpSpec::Open(OpenMode::ReadWriteCreate),
-        OpSpec::Open(OpenMode::AppendCreate),
-        OpSpec::Close,
-        //        OpSpec::Write(WritePayload::ZeroBytes),
-        OpSpec::Write(WritePayload::Bytes32),
-        //        OpSpec::Write(WritePayload::Bytes32K),
-        OpSpec::Read(ReadSize::Bytes32),
-        OpSpec::WriteStderr,
-        OpSpec::Delete,
-    ]
-}
-
 fn expand_op(spec: OpSpec, slot: usize, file: Option<FileId>) -> Op {
     match spec {
         OpSpec::Open(mode) => Op::Open {
@@ -866,12 +1035,53 @@ fn expand_op(spec: OpSpec, slot: usize, file: Option<FileId>) -> Op {
         OpSpec::Delete => Op::Delete {
             file: file.expect("delete ops are expanded across files"),
         },
+        OpSpec::Seek(target) => Op::Seek { slot, target },
+        OpSpec::Fstat => Op::Fstat { slot },
+        OpSpec::Stat => Op::Stat {
+            file: file.expect("stat ops are expanded across files"),
+        },
+        OpSpec::ReadDir => Op::ReadDir,
     }
 }
 
 fn write_payload(slot: usize, payload: WritePayload) -> Vec<u8> {
     let byte = if slot == 0 { b'A' } else { b'B' };
     vec![byte; payload.len()]
+}
+
+fn tmp_file_path(case_root: &Path) -> PathBuf {
+    let case_name = case_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("case-unknown");
+    let run_name = case_root
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("run-unknown");
+    PathBuf::from(format!("/tmp/fsx-oracle-{run_name}-{case_name}-C"))
+}
+
+fn cleanup_tmp_files(case_root: &Path) -> Result<(), String> {
+    for file in FILES.iter().copied().filter(|file| !file.snapshotted()) {
+        let path = file.path(case_root);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("failed to remove {}: {e}", path.display())),
+        }
+    }
+    Ok(())
+}
+
+fn read_dir_listing(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        entries.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    entries.sort();
+    Ok(entries.join("\n").into_bytes())
 }
 
 fn empty_slots() -> Vec<Option<File>> {
@@ -893,7 +1103,7 @@ fn snapshot(
     case_name: &str,
     report: &mut ReportWriter,
 ) -> Result<(), String> {
-    for file in FILES.iter().copied() {
+    for file in SNAPSHOT_FILES.iter().copied() {
         let path = file.path(root);
         let rel = format!("{case_name}/{}", file.name());
         match fs::read(&path) {
@@ -1411,12 +1621,7 @@ mod tests {
         let chain = &chain[..len];
         let mut patterns = BTreeSet::new();
         for mask in 0..scheduler.schedule_count(chain.len()) {
-            let workers = scheduler
-                .schedule(chain, mask)
-                .steps
-                .iter()
-                .map(|step| step.worker)
-                .collect::<Vec<_>>();
+            let workers = scheduler.workers(chain.len(), mask).collect::<Vec<_>>();
             patterns.insert(canonicalize_workers(&workers));
         }
         patterns
@@ -1432,12 +1637,13 @@ mod tests {
 
     #[test]
     fn generator_expands_all_operation_and_worker_permutations() {
-        assert_eq!(FILES.len(), 2);
-        assert_eq!(concrete_ops().len(), 17);
-        assert_eq!(generated_scheduled_case_count(1), 17);
-        assert_eq!(generated_scheduled_case_count(2), 578);
-        assert_eq!(generated_scheduled_case_count(3), 19652);
-        assert_eq!(generated_scheduled_case_count(4), 668168);
+        assert_eq!(FILES.len(), 3);
+        assert_eq!(SNAPSHOT_FILES.len(), 2);
+        assert_eq!(concrete_ops().len(), 54);
+        assert_eq!(generated_scheduled_case_count(1), 54);
+        assert_eq!(generated_scheduled_case_count(2), 5832);
+        assert_eq!(generated_scheduled_case_count(3), 629856);
+        assert_eq!(generated_scheduled_case_count(4), 68024448);
     }
 
     #[test]
@@ -1452,7 +1658,7 @@ mod tests {
 
     #[test]
     fn fd_slots_are_scoped_to_executing_worker() {
-        let root = temp_oracle_dir("per-worker-fd");
+        let root = Arc::new(temp_oracle_dir("per-worker-fd"));
         let state = Arc::new(Mutex::new(State {
             workers: empty_workers(2),
         }));
@@ -1466,7 +1672,7 @@ mod tests {
                     file: FileId::A,
                     mode: OpenMode::ReadWriteCreate,
                 },
-                case_root: root.clone(),
+                case_root: Arc::clone(&root),
             },
         );
         let t2_open = execute_job(
@@ -1478,7 +1684,7 @@ mod tests {
                     file: FileId::A,
                     mode: OpenMode::ReadWriteCreate,
                 },
-                case_root: root.clone(),
+                case_root: Arc::clone(&root),
             },
         );
         let t1_close = execute_job(
@@ -1486,7 +1692,7 @@ mod tests {
             &state,
             Job {
                 op: Op::Close { slot: 0 },
-                case_root: root.clone(),
+                case_root: Arc::clone(&root),
             },
         );
         let t1_write_after_close = execute_job(
@@ -1497,7 +1703,7 @@ mod tests {
                     slot: 0,
                     payload: WritePayload::Bytes32,
                 },
-                case_root: root.clone(),
+                case_root: Arc::clone(&root),
             },
         );
         let t2_write_after_t1_close = execute_job(
@@ -1508,7 +1714,7 @@ mod tests {
                     slot: 0,
                     payload: WritePayload::Bytes32,
                 },
-                case_root: root.clone(),
+                case_root: Arc::clone(&root),
             },
         );
 
@@ -1518,6 +1724,6 @@ mod tests {
         assert_eq!(t1_write_after_close.result.err, OracleErr::BadFd);
         assert_eq!(t2_write_after_t1_close.result, OpResult::ok(32));
 
-        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(root.as_ref());
     }
 }

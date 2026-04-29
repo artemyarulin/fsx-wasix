@@ -83,12 +83,16 @@ capture the expected transcript, then run the same sequence under Wasmer and
 compare against that transcript.
 
 The current operation catalog is explicit in `tester_oracle.rs`:
-`open(read_write_create)`, `open(append_create)`, `close`,
-`write(zero_bytes)`, `write(32_bytes)`, `write(32_kb)`, `read(32_bytes)`,
-`write_stderr`, and `delete`.
+`open(read_write_create)`, `open(append_create)`, `open(read_write_truncate)`,
+`open(read_write_create_new)`, `close`, `write(zero_bytes)`,
+`write(32_bytes)`, `write(4_kb)`, `write(32_kb)`, `read(zero_bytes)`,
+`read(32_bytes)`, `read(4_kb)`, `seek(start)`, `seek(end)`, `fstat`,
+`stat`, `read_dir`, `write_stderr`, and `delete`.
 The generator expands each operation across both FD handles, and expands
 file-scoped operations such as `open` across the files listed in the `FILES`
-constant. The default is currently two files: `A` and `B`.
+constant. The default is currently `A`, `B`, and `C`; `C` is backed by a
+unique `/tmp` path per case and is intentionally skipped by host-side snapshot
+verification.
 
 The easiest way to run the full native, Wasmer, and host-side verification flow
 is:
@@ -103,6 +107,8 @@ at startup by default. On successful runs it also removes the large case-file
 trees and keeps only `native-report.bin` and `wasix-report.bin`.
 Native oracle reports are cached under `oracle-cache/`; set
 `USE_NATIVE_CACHE=0` to force regeneration.
+The `/tmp`-backed file uses paths with the `fsx-oracle-*` prefix; `run.sh`
+cleans stale matching paths on startup by default.
 
 Native oracle:
 

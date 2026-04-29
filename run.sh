@@ -2,13 +2,14 @@
 set -euo pipefail
 
 # Main knob: sequence length for the exhaustive oracle generator.
-CHAIN_LENGTH="${CHAIN_LENGTH:-3}"
+CHAIN_LENGTH="${CHAIN_LENGTH:-2}"
 
 # Disk-safety knob: binary reports are compact, but old run directories can
 # still accumulate many case files. Set to 0 if you want to keep history.
 CLEAN_OLD_RUNS_ON_START="${CLEAN_OLD_RUNS_ON_START:-0}"
 CLEAN_CASE_FILES_ON_SUCCESS="${CLEAN_CASE_FILES_ON_SUCCESS:-1}"
 USE_NATIVE_CACHE="${USE_NATIVE_CACHE:-1}"
+CLEAN_TMP_ON_START="${CLEAN_TMP_ON_START:-1}"
 
 # Output and mount layout. Edit these if you want to keep runs somewhere else.
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
@@ -34,6 +35,9 @@ if [[ "${CLEAN_OLD_RUNS_ON_START}" == "1" ]]; then
   echo "==> Cleaning old oracle-runs"
   rm -rf "${SCRIPT_DIR}/oracle-runs"
 fi
+if [[ "${CLEAN_TMP_ON_START}" == "1" ]]; then
+  rm -rf /tmp/fsx-oracle-* 2>/dev/null || true
+fi
 
 mkdir -p "${NATIVE_ROOT}" "${VOLUME_ROOT}/fsx-oracle-wasix"
 
@@ -51,7 +55,7 @@ mkdir -p "${CACHE_ROOT}"
 NATIVE_CACHE_KEY="$(
   {
     printf 'chain_length=%s\n' "${CHAIN_LENGTH}"
-    printf 'report_version=%s\n' "1"
+    printf 'report_version=%s\n' "2"
     printf 'target_os=%s\n' "$(uname -s)"
     printf 'target_arch=%s\n' "$(uname -m)"
     shasum -a 256 Cargo.lock Cargo.toml src/main.rs src/tester_oracle.rs run.sh
