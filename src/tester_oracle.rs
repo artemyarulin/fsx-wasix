@@ -4,6 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
     thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::Cli;
@@ -254,20 +255,21 @@ fn op_catalog() -> &'static [OpSpec] {
         OpSpec::Open(OpenMode::ReadWriteTruncate),
         OpSpec::Open(OpenMode::ReadWriteCreateNew),
         OpSpec::Close,
-        OpSpec::Write(WritePayload::ZeroBytes),
         OpSpec::Write(WritePayload::Bytes32),
-        OpSpec::Write(WritePayload::Bytes4K),
-        OpSpec::Write(WritePayload::Bytes32K),
-        OpSpec::Read(ReadSize::ZeroBytes),
         OpSpec::Read(ReadSize::Bytes32),
-        OpSpec::Read(ReadSize::Bytes4K),
-        OpSpec::Seek(SeekTarget::Start),
-        OpSpec::Seek(SeekTarget::End),
         OpSpec::Fstat,
         OpSpec::Stat,
         OpSpec::ReadDir,
         OpSpec::WriteStderr,
         OpSpec::Delete,
+        // Unlikely
+        // OpSpec::Write(WritePayload::ZeroBytes),
+        // OpSpec::Write(WritePayload::Bytes4K),
+        // OpSpec::Write(WritePayload::Bytes32K),
+        // OpSpec::Read(ReadSize::ZeroBytes),
+        // OpSpec::Read(ReadSize::Bytes4K),
+        // OpSpec::Seek(SeekTarget::Start),
+        // OpSpec::Seek(SeekTarget::End),
     ]
 }
 
@@ -619,6 +621,48 @@ struct WorkerPool {
     handles: Vec<thread::JoinHandle<()>>,
 }
 
+struct Progress {
+    total: usize,
+    next_print: Instant,
+}
+
+impl Progress {
+    fn new(total: usize) -> Self {
+        let progress = Progress {
+            total,
+            next_print: Instant::now() + Duration::from_secs(1),
+        };
+        progress.print(0);
+        progress
+    }
+
+    fn maybe_print(&mut self, index: usize) {
+        if Instant::now() >= self.next_print {
+            self.print(index);
+            self.next_print = Instant::now() + Duration::from_secs(1);
+        }
+    }
+
+    fn finish(&self, index: usize) {
+        self.print(index);
+    }
+
+    fn print(&self, index: usize) {
+        let percent = if self.total == 0 {
+            100.0
+        } else {
+            (index as f64 * 100.0) / self.total as f64
+        };
+        println!(
+            "[{}] {:06.2}% {}/{}",
+            current_timestamp(),
+            percent,
+            index,
+            self.total
+        );
+    }
+}
+
 struct ReportWriter {
     writer: BufWriter<File>,
 }
@@ -826,6 +870,10 @@ fn run_suite(root: &Path, len: usize, output: &Path) -> Result<(), String> {
     let generator = ChainGenerator::new();
     let chains = generator.generate(len);
     let scheduler = Scheduler::new(WORKERS);
+    let total_cases = chains
+        .iter()
+        .map(|chain| scheduler.schedule_count(chain.len()))
+        .sum::<usize>();
 
     let run = root
         .file_name()
@@ -834,6 +882,7 @@ fn run_suite(root: &Path, len: usize, output: &Path) -> Result<(), String> {
     let mut report = ReportWriter::create(output, len, run)?;
 
     let runner = WorkerPool::start(WORKERS);
+    let mut progress = Progress::new(total_cases);
 
     let mut case_id = 0usize;
     for chain in chains {
@@ -855,10 +904,12 @@ fn run_suite(root: &Path, len: usize, output: &Path) -> Result<(), String> {
             snapshot(&case_root, case_id, &case_name, &mut report)?;
             runner.reset_state();
             cleanup_tmp_files(&case_root)?;
+            progress.maybe_print(case_id);
         }
     }
 
     runner.stop();
+    progress.finish(case_id);
 
     report.end(case_id)
 }
@@ -1478,6 +1529,34 @@ fn stable_hash(data: &[u8]) -> u64 {
     h
 }
 
+fn current_timestamp() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let days = secs.div_euclid(86_400);
+    let seconds_of_day = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    (year, month, day)
+}
+
 fn write_u8<W: Write>(w: &mut W, value: u8) -> Result<(), String> {
     w.write_all(&[value])
         .map_err(|e| format!("failed to write oracle report: {e}"))
@@ -1639,11 +1718,11 @@ mod tests {
     fn generator_expands_all_operation_and_worker_permutations() {
         assert_eq!(FILES.len(), 3);
         assert_eq!(SNAPSHOT_FILES.len(), 2);
-        assert_eq!(concrete_ops().len(), 54);
-        assert_eq!(generated_scheduled_case_count(1), 54);
-        assert_eq!(generated_scheduled_case_count(2), 5832);
-        assert_eq!(generated_scheduled_case_count(3), 629856);
-        assert_eq!(generated_scheduled_case_count(4), 68024448);
+        assert_eq!(concrete_ops().len(), 40);
+        assert_eq!(generated_scheduled_case_count(1), 40);
+        assert_eq!(generated_scheduled_case_count(2), 3200);
+        assert_eq!(generated_scheduled_case_count(3), 256000);
+        assert_eq!(generated_scheduled_case_count(4), 20480000);
     }
 
     #[test]
