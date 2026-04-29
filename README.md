@@ -101,6 +101,8 @@ Edit `CHAIN_LENGTH` at the top of `run.sh` to change the sequence length.
 The script writes compact binary reports and cleans old `oracle-runs/` output
 at startup by default. On successful runs it also removes the large case-file
 trees and keeps only `native-report.bin` and `wasix-report.bin`.
+Native oracle reports are cached under `oracle-cache/`; set
+`USE_NATIVE_CACHE=0` to force regeneration.
 
 Native oracle:
 

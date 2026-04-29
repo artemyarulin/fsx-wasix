@@ -8,3 +8,4 @@ syntax: glob
 .nfs.*
 target
 oracle-runs
+oracle-cache
