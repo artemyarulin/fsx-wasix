@@ -11,8 +11,10 @@ use std::{
 
 use crate::{
     tester_fsx::{run_workers, worker_count, Config},
-    tester_multi_threaded, Cli,
+    tester_multi_threaded, wss, Cli,
 };
+
+const INDEX_HTML: &str = include_str!("../index.html");
 
 fn server_port(cli: &Cli) -> u16 {
     cli.server
@@ -446,12 +448,14 @@ fn handle_connection(mut stream: TcpStream, server_cli: &Cli, base_config: &Conf
     let target = fields[1];
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+
+    if method == "GET" && path == "/wss" {
+        wss::handle_connection(stream, &request, server_cli);
+        return;
+    }
+
     let response = match (method, path) {
-        ("GET", "/") => http_response(
-            "200 OK",
-            "text/plain; charset=utf-8",
-            "fsx HTTP server\n\nGET /health\nGET /run?cwd=/data&file=fsxfile&n=1000&threads=4&seed=1&flen=10485760\nGET /run?mode=orchestrated&cwd=/data&file=orch&scenario=shared-inode&n=10&threads=4\nPOST /run with application/x-www-form-urlencoded body\n\nRun parameters: mode, cwd, file, path, n/numops, threads/j, seed, opnum, timeout_ms, flen, nosizechecks, opsize_min, opsize_max, opsize_align, artifacts_dir, inject, and operation weights such as close_open/read/write/mapread/mapwrite/truncate/fsync/fdatasync. Orchestrated parameters also include scenario, files, handles, parallelism, verify_every, and manifest.\n".to_owned(),
-        ),
+        ("GET", "/") => http_response("200 OK", "text/html; charset=utf-8", INDEX_HTML.to_owned()),
         ("GET", "/health") => json_response("200 OK", "{\"ok\":true}\n".to_owned()),
         ("GET", "/run") => match parse_params(query) {
             Ok(params) => run_endpoint(server_cli, base_config, params),
@@ -482,7 +486,11 @@ pub(crate) fn run_server(cli: Cli, config: Config) -> io::Result<()> {
     println!("Listening on http://0.0.0.0:{port}");
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => handle_connection(stream, &cli, &config),
+            Ok(stream) => {
+                let cli = cli.clone();
+                let config = config.clone();
+                thread::spawn(move || handle_connection(stream, &cli, &config));
+            }
             Err(e) => eprintln!("error: failed to accept connection: {e}"),
         }
     }

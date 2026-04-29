@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>fsx WASIX Oracle</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="min-h-screen bg-slate-950 text-slate-100">
+    <main class="mx-auto flex min-h-screen max-w-7xl gap-6 p-6">
+      <section class="w-1/2 rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-2xl">
+        <div class="mb-6">
+          <p class="text-sm uppercase tracking-[0.3em] text-cyan-300">fsx WASIX</p>
+          <h1 class="mt-2 text-3xl font-semibold">Oracle Runner</h1>
+          <p class="mt-2 text-sm text-slate-400">
+            Configure an oracle run, start it over a websocket, and watch live progress.
+          </p>
+        </div>
+
+        <form id="run-form" class="space-y-5">
+          <label class="block">
+            <span class="text-sm font-medium text-slate-300">Chain length</span>
+            <input
+              id="chain_length"
+              name="chain_length"
+              type="number"
+              min="1"
+              value="3"
+              class="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-cyan-400/40 focus:ring-4"
+            />
+          </label>
+
+          <label class="block">
+            <span class="text-sm font-medium text-slate-300">Oracle root</span>
+            <input
+              id="root"
+              name="root"
+              value="/tmp/fsx-oracle-ws"
+              class="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-cyan-400/40 focus:ring-4"
+            />
+          </label>
+
+          <label class="block">
+            <span class="text-sm font-medium text-slate-300">Output report</span>
+            <input
+              id="output"
+              name="output"
+              value="/tmp/fsx-oracle-ws/oracle-report.bin"
+              class="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-cyan-400/40 focus:ring-4"
+            />
+          </label>
+
+          <label class="block">
+            <span class="text-sm font-medium text-slate-300">Expected report (optional)</span>
+            <input
+              id="expected"
+              name="expected"
+              placeholder="/work/native-report.bin"
+              class="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-cyan-400/40 focus:ring-4"
+            />
+          </label>
+
+          <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
+            <div class="flex items-center justify-between text-sm">
+              <span class="text-slate-400">Endpoint</span>
+              <code id="endpoint" class="text-cyan-300"></code>
+            </div>
+            <div class="mt-3 h-3 overflow-hidden rounded-full bg-slate-800">
+              <div id="bar" class="h-full w-0 rounded-full bg-cyan-400 transition-all"></div>
+            </div>
+            <div class="mt-3 flex justify-between text-sm text-slate-400">
+              <span id="status">Idle</span>
+              <span id="counter">0/0</span>
+            </div>
+          </div>
+
+          <button
+            id="start"
+            type="submit"
+            class="w-full rounded-xl bg-cyan-400 px-5 py-3 font-semibold text-slate-950 shadow-lg shadow-cyan-400/20 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300"
+          >
+            START
+          </button>
+        </form>
+      </section>
+
+      <section class="flex w-1/2 flex-col rounded-2xl border border-slate-800 bg-black shadow-2xl">
+        <div class="flex items-center justify-between border-b border-slate-800 px-5 py-4">
+          <div>
+            <h2 class="font-semibold">Progress Stream</h2>
+            <p class="text-sm text-slate-500">Messages from /wss</p>
+          </div>
+          <button id="clear" class="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-900">
+            Clear
+          </button>
+        </div>
+        <pre id="log" class="flex-1 overflow-auto whitespace-pre-wrap p-5 font-mono text-sm leading-6 text-emerald-300"></pre>
+      </section>
+    </main>
+
+    <script>
+      const endpoint = document.getElementById("endpoint");
+      const form = document.getElementById("run-form");
+      const start = document.getElementById("start");
+      const log = document.getElementById("log");
+      const status = document.getElementById("status");
+      const counter = document.getElementById("counter");
+      const bar = document.getElementById("bar");
+      const clear = document.getElementById("clear");
+
+      function wsUrl() {
+        const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+        return `${scheme}//${window.location.host}/wss`;
+      }
+
+      endpoint.textContent = wsUrl();
+
+      function append(line) {
+        log.textContent += `${line}\n`;
+        log.scrollTop = log.scrollHeight;
+      }
+
+      function setProgress(percent, index, total) {
+        bar.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+        counter.textContent = `${index}/${total}`;
+      }
+
+      clear.addEventListener("click", () => {
+        log.textContent = "";
+      });
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        log.textContent = "";
+        setProgress(0, 0, 0);
+        status.textContent = "Connecting";
+        start.disabled = true;
+
+        const socket = new WebSocket(wsUrl());
+        socket.addEventListener("open", () => {
+          const params = new URLSearchParams(new FormData(form));
+          append(`> start ${params.toString()}`);
+          socket.send(params.toString());
+        });
+
+        socket.addEventListener("message", (event) => {
+          let message;
+          try {
+            message = JSON.parse(event.data);
+          } catch {
+            append(event.data);
+            return;
+          }
+
+          if (message.type === "ready") {
+            status.textContent = "Connected";
+          } else if (message.type === "started") {
+            status.textContent = `Running L=${message.chain_length}`;
+            append(`started root=${message.root} output=${message.output}`);
+          } else if (message.type === "progress") {
+            status.textContent = message.line;
+            setProgress(message.percent, message.index, message.total);
+            append(message.line);
+          } else if (message.type === "done") {
+            status.textContent = "Done";
+            setProgress(100, counter.textContent.split("/")[1] || 0, counter.textContent.split("/")[1] || 0);
+            append("done: ok");
+          } else if (message.type === "error") {
+            status.textContent = "Error";
+            append(`error: ${message.error}`);
+          } else {
+            append(JSON.stringify(message));
+          }
+        });
+
+        socket.addEventListener("close", () => {
+          start.disabled = false;
+          append("> socket closed");
+        });
+
+        socket.addEventListener("error", () => {
+          status.textContent = "Socket error";
+          append("error: websocket failed");
+        });
+      });
+    </script>
+  </body>
+</html>

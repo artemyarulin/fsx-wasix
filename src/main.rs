@@ -4,6 +4,7 @@ mod http;
 mod tester_fsx;
 mod tester_multi_threaded;
 mod tester_oracle;
+mod wss;
 
 use std::{
     ffi::OsStr,

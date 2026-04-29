@@ -621,45 +621,68 @@ struct WorkerPool {
     handles: Vec<thread::JoinHandle<()>>,
 }
 
+pub(crate) struct OracleProgress {
+    pub(crate) timestamp: String,
+    pub(crate) percent: f64,
+    pub(crate) index: usize,
+    pub(crate) total: usize,
+    pub(crate) line: String,
+}
+
 struct Progress {
     total: usize,
     next_print: Instant,
 }
 
 impl Progress {
-    fn new(total: usize) -> Self {
+    fn new<F>(total: usize, on_progress: &mut F) -> Result<Self, String>
+    where
+        F: FnMut(&OracleProgress) -> Result<(), String>,
+    {
         let progress = Progress {
             total,
             next_print: Instant::now() + Duration::from_secs(1),
         };
-        progress.print(0);
-        progress
+        progress.emit(0, on_progress)?;
+        Ok(progress)
     }
 
-    fn maybe_print(&mut self, index: usize) {
+    fn maybe_print<F>(&mut self, index: usize, on_progress: &mut F) -> Result<(), String>
+    where
+        F: FnMut(&OracleProgress) -> Result<(), String>,
+    {
         if Instant::now() >= self.next_print {
-            self.print(index);
+            self.emit(index, on_progress)?;
             self.next_print = Instant::now() + Duration::from_secs(1);
         }
+        Ok(())
     }
 
-    fn finish(&self, index: usize) {
-        self.print(index);
+    fn finish<F>(&self, index: usize, on_progress: &mut F) -> Result<(), String>
+    where
+        F: FnMut(&OracleProgress) -> Result<(), String>,
+    {
+        self.emit(index, on_progress)
     }
 
-    fn print(&self, index: usize) {
+    fn emit<F>(&self, index: usize, on_progress: &mut F) -> Result<(), String>
+    where
+        F: FnMut(&OracleProgress) -> Result<(), String>,
+    {
         let percent = if self.total == 0 {
             100.0
         } else {
             (index as f64 * 100.0) / self.total as f64
         };
-        println!(
-            "[{}] {:06.2}% {}/{}",
-            current_timestamp(),
+        let timestamp = current_timestamp();
+        let line = format!("[{timestamp}] {percent:06.2}% {index}/{}", self.total);
+        on_progress(&OracleProgress {
+            timestamp,
             percent,
             index,
-            self.total
-        );
+            total: self.total,
+            line,
+        })
     }
 }
 
@@ -809,6 +832,16 @@ impl WorkerPool {
 }
 
 pub(crate) fn run(cli: Cli) -> Result<(), String> {
+    run_with_progress(cli, |progress| {
+        println!("{}", progress.line);
+        Ok(())
+    })
+}
+
+pub(crate) fn run_with_progress<F>(cli: Cli, mut on_progress: F) -> Result<(), String>
+where
+    F: FnMut(&OracleProgress) -> Result<(), String>,
+{
     let root = cli
         .fname
         .clone()
@@ -824,7 +857,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), String> {
         .oracle_output
         .clone()
         .unwrap_or_else(|| root.join("oracle-report.bin"));
-    run_suite(&work_root, len, &output)?;
+    run_suite(&work_root, len, &output, &mut on_progress)?;
 
     if let Some(path) = &cli.oracle_expected {
         compare_reports(path, &output)?;
@@ -866,7 +899,10 @@ pub(crate) fn verify_files(native_report: &Path, wasix_report: &Path) -> Result<
     Ok(())
 }
 
-fn run_suite(root: &Path, len: usize, output: &Path) -> Result<(), String> {
+fn run_suite<F>(root: &Path, len: usize, output: &Path, on_progress: &mut F) -> Result<(), String>
+where
+    F: FnMut(&OracleProgress) -> Result<(), String>,
+{
     let generator = ChainGenerator::new();
     let chains = generator.generate(len);
     let scheduler = Scheduler::new(WORKERS);
@@ -882,7 +918,7 @@ fn run_suite(root: &Path, len: usize, output: &Path) -> Result<(), String> {
     let mut report = ReportWriter::create(output, len, run)?;
 
     let runner = WorkerPool::start(WORKERS);
-    let mut progress = Progress::new(total_cases);
+    let mut progress = Progress::new(total_cases, on_progress)?;
 
     let mut case_id = 0usize;
     for chain in chains {
@@ -904,12 +940,12 @@ fn run_suite(root: &Path, len: usize, output: &Path) -> Result<(), String> {
             snapshot(&case_root, case_id, &case_name, &mut report)?;
             runner.reset_state();
             cleanup_tmp_files(&case_root)?;
-            progress.maybe_print(case_id);
+            progress.maybe_print(case_id, on_progress)?;
         }
     }
 
     runner.stop();
-    progress.finish(case_id);
+    progress.finish(case_id, on_progress)?;
 
     report.end(case_id)
 }
