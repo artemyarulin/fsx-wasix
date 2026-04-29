@@ -46,7 +46,7 @@ choose a specific count:
 
 ```sh
 wasmer run --volume "$PWD:/work" \
-  target/wasm32-wasmer-wasi/debug/fsx.wasm -- \
+  target/wasm32-wasmer-wasi/debug/fsx-wasix.wasm -- \
   -f /work/fsx-10mb.toml -N 10000 -S 1 -j4 /tmp/fsxfile
 ```
 
@@ -65,7 +65,7 @@ Run multi-worker mode:
 
 ```sh
 wasmer run --volume "$PWD:/work" --volume "$PWD/wasmer-data:/data" \
-  target/wasm32-wasmer-wasi/debug/fsx.wasm -- \
+  target/wasm32-wasmer-wasi/debug/fsx-wasix.wasm -- \
   -f /work/fsx-10mb.toml -N 10000 -S 1 -j4 /data/fsxfile
 ```
 
@@ -73,6 +73,83 @@ wasmer run --volume "$PWD:/work" --volume "$PWD/wasmer-data:/data" \
 
 `-N` controls operations per worker. For example, `-N 10000 -j4` plans 40,000
 total operations. Use a seed with `-S` to make the run reproducible.
+
+## Oracle Mode
+
+Oracle mode exhaustively runs generated sequences of `open`, `close`, `write`,
+and `read` commands across two worker threads, two logical handles, and two
+files. It does not prune invalid sequences. Instead, run it natively first to
+capture the expected transcript, then run the same sequence under Wasmer and
+compare against that transcript.
+
+The current operation catalog is explicit in `tester_oracle.rs`:
+`open(read_write_create)`, `open(append_create)`, `close`,
+`write(zero_bytes)`, `write(32_bytes)`, `write(32_kb)`, `read(32_bytes)`,
+`write_stderr`, and `delete`.
+The generator expands each operation across both FD handles, and expands
+file-scoped operations such as `open` across the files listed in the `FILES`
+constant. The default is currently two files: `A` and `B`.
+
+The easiest way to run the full native, Wasmer, and host-side verification flow
+is:
+
+```sh
+./run.sh
+```
+
+Edit `CHAIN_LENGTH` at the top of `run.sh` to change the sequence length.
+The script writes compact binary reports and cleans old `oracle-runs/` output
+at startup by default. On successful runs it also removes the large case-file
+trees and keeps only `native-report.bin` and `wasix-report.bin`.
+
+Native oracle:
+
+```sh
+mkdir -p /tmp/fsx-oracle-native
+
+cargo run -- --oracle -N 2 \
+  --oracle-output /tmp/fsx-oracle-native/report.bin \
+  /tmp/fsx-oracle-native
+
+cp /tmp/fsx-oracle-native/report.bin fsx-oracle-native-report.bin
+```
+
+WASIX comparison on `/tmp`:
+
+```sh
+wasmer run --volume "$PWD:/work" \
+  target/wasm32-wasmer-wasi/debug/fsx-wasix.wasm -- \
+  --oracle -N 2 \
+  --oracle-expected /work/fsx-oracle-native-report.bin \
+  /tmp/fsx-oracle-wasix
+```
+
+WASIX comparison on a mounted `/data` volume:
+
+```sh
+mkdir -p wasmer-data/fsx-oracle-wasix
+
+wasmer run --volume "$PWD:/work" --volume "$PWD/wasmer-data:/data" \
+  target/wasm32-wasmer-wasi/debug/fsx-wasix.wasm -- \
+  --oracle -N 2 \
+  --oracle-expected /work/fsx-oracle-native-report.bin \
+  --oracle-output /data/fsx-oracle-wasix/report.bin \
+  /data/fsx-oracle-wasix
+```
+
+For mounted volumes, run an additional host-side verification pass after Wasmer
+exits. This compares the native and WASIX reports, then re-reads the files
+directly from the host mount so the final content check does not rely on WASIX:
+
+```sh
+cargo run -- --oracle-verify-files \
+  /tmp/fsx-oracle-native/report.bin \
+  wasmer-data/fsx-oracle-wasix/report.bin
+```
+
+For oracle mode, `-N` is the command sequence length. Length 2 is a quick smoke
+run. Length 3 is much larger because each command position can be assigned to
+either worker thread.
 
 ## HTTP Server
 
@@ -83,7 +160,7 @@ Wasmer networking enabled:
 mkdir -p wasmer-data
 
 wasmer run --net --volume "$PWD:/work" --volume "$PWD/wasmer-data:/data" \
-  target/wasm32-wasmer-wasi/debug/fsx.wasm -- \
+  target/wasm32-wasmer-wasi/debug/fsx-wasix.wasm -- \
   --server 3020
 ```
 

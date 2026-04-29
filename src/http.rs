@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     tester_fsx::{run_workers, worker_count, Config},
-    Cli,
+    tester_multi_threaded, Cli,
 };
 
 fn server_port(cli: &Cli) -> u16 {
@@ -50,8 +50,7 @@ fn decode_url_component(s: &str) -> Result<String, String> {
             }
         }
     }
-    String::from_utf8(out)
-        .map_err(|_| "query value is not valid utf-8".to_owned())
+    String::from_utf8(out).map_err(|_| "query value is not valid utf-8".to_owned())
 }
 
 fn parse_params(s: &str) -> Result<HashMap<String, String>, String> {
@@ -63,10 +62,7 @@ fn parse_params(s: &str) -> Result<HashMap<String, String>, String> {
     Ok(params)
 }
 
-fn param_parse<T>(
-    params: &HashMap<String, String>,
-    name: &str,
-) -> Result<Option<T>, String>
+fn param_parse<T>(params: &HashMap<String, String>, name: &str) -> Result<Option<T>, String>
 where
     T: std::str::FromStr,
     T::Err: fmt::Display,
@@ -77,10 +73,7 @@ where
         .transpose()
 }
 
-fn param_bool(
-    params: &HashMap<String, String>,
-    name: &str,
-) -> Result<Option<bool>, String> {
+fn param_bool(params: &HashMap<String, String>, name: &str) -> Result<Option<bool>, String> {
     params
         .get(name)
         .map(|v| match v.as_str() {
@@ -111,8 +104,7 @@ fn server_run_from_params(
         .get("cwd")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    fs::create_dir_all(&cwd)
-        .map_err(|e| format!("failed to create cwd: {e}"))?;
+    fs::create_dir_all(&cwd).map_err(|e| format!("failed to create cwd: {e}"))?;
 
     let fname = if let Some(path) = params.get("path") {
         let p = PathBuf::from(path);
@@ -133,6 +125,11 @@ fn server_run_from_params(
     cli.fname = Some(fname);
     cli.config = None;
     cli.server = None;
+    cli.orchestrated = params
+        .get("mode")
+        .map(|v| v == "orchestrated")
+        .unwrap_or(false)
+        || param_bool(params, "orchestrated")?.unwrap_or(false);
     cli.inject = param_parse::<u64>(params, "inject")?;
     cli.numops = Some(
         param_parse::<u64>(params, "numops")?
@@ -152,6 +149,24 @@ fn server_run_from_params(
     }
     if let Some(v) = params.get("artifacts_dir") {
         cli.artifacts_dir = Some(PathBuf::from(v));
+    }
+    if let Some(v) = params.get("scenario") {
+        cli.scenario = v.clone();
+    }
+    if let Some(v) = param_parse::<NonZeroUsize>(params, "files")? {
+        cli.files = v;
+    }
+    if let Some(v) = param_parse::<NonZeroUsize>(params, "handles")? {
+        cli.handles = v;
+    }
+    if let Some(v) = param_parse::<NonZeroUsize>(params, "parallelism")? {
+        cli.parallelism = v;
+    }
+    if let Some(v) = param_parse::<NonZeroU64>(params, "verify_every")? {
+        cli.verify_every = Some(v);
+    }
+    if let Some(v) = params.get("manifest") {
+        cli.manifest = Some(PathBuf::from(v));
     }
 
     let mut config = base_config.clone();
@@ -181,8 +196,7 @@ fn server_run_from_params(
     apply_weight_param(params, "fdatasync", &mut config.weights.fdatasync)?;
 
     config.validate_result(&cli)?;
-    let timeout =
-        param_parse::<u64>(params, "timeout_ms")?.map(Duration::from_millis);
+    let timeout = param_parse::<u64>(params, "timeout_ms")?.map(Duration::from_millis);
     Ok((cli, config, timeout))
 }
 
@@ -195,9 +209,7 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() => {
-                out.push_str(&format!("\\u{:04x}", c as u32))
-            }
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
     }
@@ -221,19 +233,19 @@ fn run_endpoint(
     base_config: &Config,
     params: HashMap<String, String>,
 ) -> Vec<u8> {
-    let (cli, config, timeout) =
-        match server_run_from_params(server_cli, base_config, &params) {
-            Ok(v) => v,
-            Err(e) => {
-                return json_response(
-                    "400 Bad Request",
-                    format!(
-                        "{{\"ok\":false,\"error\":\"{}\"}}\n",
-                        json_escape(&e)
-                    ),
-                )
-            }
-        };
+    let (cli, config, timeout) = match server_run_from_params(server_cli, base_config, &params) {
+        Ok(v) => v,
+        Err(e) => {
+            return json_response(
+                "400 Bad Request",
+                format!("{{\"ok\":false,\"error\":\"{}\"}}\n", json_escape(&e)),
+            )
+        }
+    };
+
+    if cli.orchestrated {
+        return run_orchestrated_endpoint(cli, config, timeout);
+    }
 
     let workers = worker_count(&cli);
     let target = cli
@@ -316,11 +328,101 @@ fn run_endpoint(
     }
 }
 
-fn handle_connection(
-    mut stream: TcpStream,
-    server_cli: &Cli,
-    base_config: &Config,
-) {
+fn run_orchestrated_endpoint(cli: Cli, config: Config, timeout: Option<Duration>) -> Vec<u8> {
+    let workers = tester_multi_threaded::worker_count(&cli);
+    let target = cli
+        .fname
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let scenario = cli.scenario.clone();
+    let started = Instant::now();
+
+    if let Some(timeout) = timeout {
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let r = tester_multi_threaded::run(cli, config);
+            let _ = tx.send(r);
+        });
+        match rx.recv_timeout(timeout) {
+            Ok(Ok(summary)) => orchestrated_ok(&target, summary),
+            Ok(Err(e)) => orchestrated_err(
+                "500 Internal Server Error",
+                workers,
+                &scenario,
+                started.elapsed(),
+                &target,
+                &e.to_string(),
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => orchestrated_err(
+                "504 Gateway Timeout",
+                workers,
+                &scenario,
+                started.elapsed(),
+                &target,
+                "timeout exceeded; run continues in background",
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => orchestrated_err(
+                "500 Internal Server Error",
+                workers,
+                &scenario,
+                started.elapsed(),
+                &target,
+                "worker coordinator disconnected",
+            ),
+        }
+    } else {
+        match tester_multi_threaded::run(cli, config) {
+            Ok(summary) => orchestrated_ok(&target, summary),
+            Err(e) => orchestrated_err(
+                "500 Internal Server Error",
+                workers,
+                &scenario,
+                started.elapsed(),
+                &target,
+                &e.to_string(),
+            ),
+        }
+    }
+}
+
+fn orchestrated_ok(target: &str, summary: tester_multi_threaded::RunSummary) -> Vec<u8> {
+    json_response(
+        "200 OK",
+        format!(
+            "{{\"ok\":true,\"mode\":\"orchestrated\",\"scenario\":\"{}\",\"workers\":{},\"steps\":{},\"verified_files\":{},\"elapsed_ms\":{},\"target\":\"{}\"}}\n",
+            json_escape(&summary.scenario),
+            summary.workers,
+            summary.steps,
+            summary.verified_files,
+            summary.elapsed.as_millis(),
+            json_escape(target),
+        ),
+    )
+}
+
+fn orchestrated_err(
+    status: &str,
+    workers: usize,
+    scenario: &str,
+    elapsed: Duration,
+    target: &str,
+    error: &str,
+) -> Vec<u8> {
+    json_response(
+        status,
+        format!(
+            "{{\"ok\":false,\"mode\":\"orchestrated\",\"scenario\":\"{}\",\"workers\":{},\"elapsed_ms\":{},\"target\":\"{}\",\"error\":\"{}\"}}\n",
+            json_escape(scenario),
+            workers,
+            elapsed.as_millis(),
+            json_escape(target),
+            json_escape(error),
+        ),
+    )
+}
+
+fn handle_connection(mut stream: TcpStream, server_cli: &Cli, base_config: &Config) {
     let mut buf = vec![0u8; 16 * 1024];
     let n = match stream.read(&mut buf) {
         Ok(0) | Err(_) => return,
@@ -348,7 +450,7 @@ fn handle_connection(
         ("GET", "/") => http_response(
             "200 OK",
             "text/plain; charset=utf-8",
-            "fsx HTTP server\n\nGET /health\nGET /run?cwd=/data&file=fsxfile&n=1000&threads=4&seed=1&flen=10485760\nPOST /run with application/x-www-form-urlencoded body\n\nRun parameters: cwd, file, path, n/numops, threads/j, seed, opnum, timeout_ms, flen, nosizechecks, opsize_min, opsize_max, opsize_align, artifacts_dir, inject, and operation weights such as close_open/read/write/mapread/mapwrite/truncate/fsync/fdatasync.\n".to_owned(),
+            "fsx HTTP server\n\nGET /health\nGET /run?cwd=/data&file=fsxfile&n=1000&threads=4&seed=1&flen=10485760\nGET /run?mode=orchestrated&cwd=/data&file=orch&scenario=shared-inode&n=10&threads=4\nPOST /run with application/x-www-form-urlencoded body\n\nRun parameters: mode, cwd, file, path, n/numops, threads/j, seed, opnum, timeout_ms, flen, nosizechecks, opsize_min, opsize_max, opsize_align, artifacts_dir, inject, and operation weights such as close_open/read/write/mapread/mapwrite/truncate/fsync/fdatasync. Orchestrated parameters also include scenario, files, handles, parallelism, verify_every, and manifest.\n".to_owned(),
         ),
         ("GET", "/health") => json_response("200 OK", "{\"ok\":true}\n".to_owned()),
         ("GET", "/run") => match parse_params(query) {

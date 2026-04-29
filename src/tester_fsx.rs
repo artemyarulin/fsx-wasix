@@ -27,8 +27,7 @@ use crate::Cli;
 /// Calculate the maximum field width needed to print numbers up to this size
 fn field_width(max: usize, hex: bool) -> usize {
     if hex {
-        2 + (8 * mem::size_of_val(&max) - max.leading_zeros() as usize)
-            .div_ceil(4)
+        2 + (8 * mem::size_of_val(&max) - max.leading_zeros() as usize).div_ceil(4)
     } else {
         1 + (max as f64).log(10.0) as usize
     }
@@ -82,21 +81,15 @@ impl Config {
             return Err("file length must be greater than zero".to_owned());
         }
         if self.opsize.max == 0 {
-            return Err(
-                "Maximum operation size must be greater than zero".to_owned()
-            );
+            return Err("Maximum operation size must be greater than zero".to_owned());
         }
         if self.opsize.min > self.opsize.max {
-            return Err(
-                "Minimum operation size must be no greater than maximum"
-                    .to_owned(),
-            );
+            return Err("Minimum operation size must be no greater than maximum".to_owned());
         }
         let align = self.opsize.align.map(usize::from).unwrap_or(1);
         if align > self.opsize.max {
             return Err(
-                "operation alignment must be no greater than maximum operation size"
-                    .to_owned(),
+                "operation alignment must be no greater than maximum operation size".to_owned(),
             );
         }
         Ok(())
@@ -400,12 +393,7 @@ impl Exerciser {
         }
     }
 
-    fn doread(
-        &mut self,
-        buf: &mut [u8],
-        offset: u64,
-        size: usize,
-    ) -> FsxResult {
+    fn doread(&mut self, buf: &mut [u8], offset: u64, size: usize) -> FsxResult {
         self.file.seek(SeekFrom::Start(offset)).unwrap();
         let read = self.file.read(buf).unwrap();
         if read < size {
@@ -415,31 +403,16 @@ impl Exerciser {
         Ok(())
     }
 
-    fn domapread(
-        &mut self,
-        buf: &mut [u8],
-        offset: u64,
-        size: usize,
-    ) -> FsxResult {
+    fn domapread(&mut self, buf: &mut [u8], offset: u64, size: usize) -> FsxResult {
         // Keep mapread in the operation mix using positioned I/O.
         self.doread(buf, offset, size)
     }
 
-    fn domapwrite(
-        &mut self,
-        cur_file_size: u64,
-        size: usize,
-        offset: u64,
-    ) -> FsxResult {
+    fn domapwrite(&mut self, cur_file_size: u64, size: usize, offset: u64) -> FsxResult {
         self.dowrite(cur_file_size, size, offset)
     }
 
-    fn dowrite(
-        &mut self,
-        _cur_file_size: u64,
-        size: usize,
-        offset: u64,
-    ) -> FsxResult {
+    fn dowrite(&mut self, _cur_file_size: u64, size: usize, offset: u64) -> FsxResult {
         let buf = &self.good_buf[offset as usize..offset as usize + size];
         self.file.seek(SeekFrom::Start(offset)).unwrap();
         let written = self.file.write(buf).unwrap();
@@ -464,11 +437,9 @@ impl Exerciser {
                     op,
                     stepwidth = self.stepwidth
                 ),
-                LogEntry::CloseOpen => error!(
-                    "{:stepwidth$} CLOSE/OPEN",
-                    i,
-                    stepwidth = self.stepwidth
-                ),
+                LogEntry::CloseOpen => {
+                    error!("{:stepwidth$} CLOSE/OPEN", i, stepwidth = self.stepwidth)
+                }
                 LogEntry::Read(offset, size) => error!(
                     "{:stepwidth$} READ     {:#fwidth$x} => {:#fwidth$x} \
                      ({:#swidth$x} bytes)",
@@ -549,11 +520,9 @@ impl Exerciser {
                 LogEntry::Fsync => {
                     error!("{:stepwidth$} FSYNC", i, stepwidth = self.stepwidth)
                 }
-                LogEntry::Fdatasync => error!(
-                    "{:stepwidth$} FDATASYNC",
-                    i,
-                    stepwidth = self.stepwidth
-                ),
+                LogEntry::Fdatasync => {
+                    error!("{:stepwidth$} FDATASYNC", i, stepwidth = self.stepwidth)
+                }
             }
             i += 1;
         }
@@ -582,13 +551,7 @@ impl Exerciser {
     }
 
     /// Wrapper around read-like operations
-    fn read_like<F>(
-        &mut self,
-        op: Op,
-        offset: u64,
-        size: usize,
-        f: F,
-    ) -> FsxResult
+    fn read_like<F>(&mut self, op: Op, offset: u64, size: usize, f: F) -> FsxResult
     where
         F: Fn(&mut Exerciser, &mut [u8], u64, usize) -> FsxResult,
     {
@@ -638,8 +601,7 @@ impl Exerciser {
     }
 
     fn save_goodfile(&self) {
-        let mut final_component =
-            self.fname.as_path().file_name().unwrap().to_owned();
+        let mut final_component = self.fname.as_path().file_name().unwrap().to_owned();
         final_component.push(".fsxgood");
         let mut fsxgoodfname = if let Some(d) = &self.artifacts_dir {
             d.clone()
@@ -666,13 +628,7 @@ impl Exerciser {
     }
 
     /// Wrapper around write-like operations.
-    fn write_like<F>(
-        &mut self,
-        op: Op,
-        offset: u64,
-        size: usize,
-        f: F,
-    ) -> FsxResult
+    fn write_like<F>(&mut self, op: Op, offset: u64, size: usize, f: F) -> FsxResult
     where
         F: Fn(&mut Exerciser, u64, usize, u64) -> FsxResult,
     {
@@ -765,8 +721,7 @@ impl Exerciser {
             size -= 1;
             self.good_buf[uoff] = (self.steps % 256) as u8;
             if uoff % 2 > 0 {
-                self.good_buf[uoff] =
-                    self.good_buf[uoff].wrapping_add(self.original_buf[uoff]);
+                self.good_buf[uoff] = self.good_buf[uoff].wrapping_add(self.original_buf[uoff]);
             }
             uoff += 1;
             if size == 0 {
@@ -776,12 +731,7 @@ impl Exerciser {
     }
 
     /// Log level to use for I/O operations.
-    fn loglevel(
-        &self,
-        offset: u64,
-        offset2: Option<u64>,
-        size: usize,
-    ) -> Level {
+    fn loglevel(&self, offset: u64, offset2: Option<u64>, size: usize) -> Level {
         let mut loglevel = Level::Info;
         if let Some((start, end)) = self.monitor {
             if start < offset + size as u64 && offset <= end {
@@ -959,10 +909,7 @@ impl Exerciser {
         rng.fill_bytes(&mut original_buf[..]);
         let fwidth = field_width(flen as usize, true);
         let swidth = field_width(conf.opsize.max, true);
-        let stepwidth = field_width(
-            cli.numops.map(|x| x as usize).unwrap_or(999999),
-            false,
-        );
+        let stepwidth = field_width(cli.numops.map(|x| x as usize).unwrap_or(999999), false);
         let wi = Op::make_weighted_index(
             [
                 conf.weights.close_open,
@@ -1013,9 +960,10 @@ pub(crate) fn worker_count(cli: &Cli) -> usize {
 
 fn thread_target(cli: &Cli, thread_num: usize) -> io::Result<Cli> {
     let thread_dir_name = format!("thread-{thread_num}");
-    let fname = cli.fname.as_ref().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "file name is required")
-    })?;
+    let fname = cli
+        .fname
+        .as_ref()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file name is required"))?;
     let base_dir = fname
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1058,10 +1006,7 @@ fn panic_message(err: Box<dyn std::any::Any + Send + 'static>) -> String {
     }
 }
 
-pub(crate) fn run_workers(
-    cli: Cli,
-    config: Config,
-) -> Result<RunSummary, String> {
+pub(crate) fn run_workers(cli: Cli, config: Config) -> Result<RunSummary, String> {
     let started = Instant::now();
     let nworkers = worker_count(&cli);
     if nworkers == 1 {
@@ -1080,12 +1025,10 @@ pub(crate) fn run_workers(
     let mut handles = Vec::with_capacity(nworkers);
 
     for thread_num in 1..=nworkers {
-        let thread_cli = thread_target(&cli, thread_num).map_err(|e| {
-            format!("failed to prepare thread-{thread_num}: {e}")
-        })?;
+        let thread_cli = thread_target(&cli, thread_num)
+            .map_err(|e| format!("failed to prepare thread-{thread_num}: {e}"))?;
         let thread_config = config.clone();
-        let builder =
-            thread::Builder::new().name(format!("fsx-thread-{thread_num}"));
+        let builder = thread::Builder::new().name(format!("fsx-thread-{thread_num}"));
         let handle = builder
             .spawn(move || {
                 let mut exerciser = Exerciser::new(thread_cli, thread_config);
@@ -1098,9 +1041,7 @@ pub(crate) fn run_workers(
     for (thread_num, handle) in handles {
         handle
             .join()
-            .map_err(|e| {
-                format!("thread-{thread_num} failed: {}", panic_message(e))
-            })?
+            .map_err(|e| format!("thread-{thread_num} failed: {}", panic_message(e)))?
             .map_err(|e| format!("thread-{thread_num} failed: {e}"))?;
     }
 
