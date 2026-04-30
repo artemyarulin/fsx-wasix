@@ -9,3 +9,5 @@ syntax: glob
 target
 oracle-runs
 oracle-cache
+*.webc
+*.bin

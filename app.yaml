@@ -1,0 +1,11 @@
+name: fsx-wasix
+app_id: da_KwGIWtMUQJ0l
+owner: artemyarulin
+package: .
+cli_args:
+- --server
+- '8080'
+volumes:
+- name: data
+  mount: /data
+kind: wasmer.io/App.v0

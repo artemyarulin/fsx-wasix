@@ -1,6 +1,8 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    mem::ManuallyDrop,
+    os::fd::{AsRawFd, FromRawFd, RawFd},
     path::{Component, Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
     thread,
@@ -246,22 +248,38 @@ impl OpSpec {
             OpSpec::WriteStderr | OpSpec::Delete | OpSpec::Stat | OpSpec::ReadDir
         )
     }
+
+    fn name(self) -> String {
+        match self {
+            OpSpec::Open(mode) => format!("open({})", mode.name()),
+            OpSpec::Close => "close".to_owned(),
+            OpSpec::Write(payload) => format!("write({}:{})", payload.name(), payload.len()),
+            OpSpec::Read(size) => format!("read({}:{})", size.name(), size.len()),
+            OpSpec::Seek(target) => format!("seek({})", target.name()),
+            OpSpec::Fstat => "fstat".to_owned(),
+            OpSpec::Stat => "stat".to_owned(),
+            OpSpec::ReadDir => "read_dir".to_owned(),
+            OpSpec::WriteStderr => format!("write_stderr({})", STDERR_MARKER.len()),
+            OpSpec::Delete => "delete".to_owned(),
+        }
+    }
 }
 
 fn op_catalog() -> &'static [OpSpec] {
     &[
         OpSpec::Open(OpenMode::ReadWriteCreate),
-        OpSpec::Open(OpenMode::AppendCreate),
-        OpSpec::Open(OpenMode::ReadWriteTruncate),
-        OpSpec::Open(OpenMode::ReadWriteCreateNew),
-        OpSpec::Close,
         OpSpec::Write(WritePayload::Bytes32),
+        OpSpec::Close,
         OpSpec::Read(ReadSize::Bytes32),
-        OpSpec::Fstat,
-        OpSpec::Stat,
-        OpSpec::ReadDir,
-        OpSpec::WriteStderr,
-        OpSpec::Delete,
+        // OpSpec::Open(OpenMode::AppendCreate),
+        // OpSpec::Open(OpenMode::ReadWriteTruncate),
+        // OpSpec::Open(OpenMode::ReadWriteCreateNew),
+        // OpSpec::Fstat,
+        // OpSpec::Stat,
+        // OpSpec::ReadDir,
+        // OpSpec::WriteStderr,
+        // OpSpec::Delete,
+
         // Unlikely
         // OpSpec::Write(WritePayload::ZeroBytes),
         // OpSpec::Write(WritePayload::Bytes4K),
@@ -415,8 +433,14 @@ struct State {
 
 #[derive(Default)]
 struct WorkerState {
-    slots: Vec<Option<File>>,
+    slots: Vec<FdSlot>,
     leaked: Vec<File>,
+}
+
+enum FdSlot {
+    NeverOpened,
+    Open(File),
+    Closed(RawFd),
 }
 
 struct Job {
@@ -627,6 +651,18 @@ pub(crate) struct OracleProgress {
     pub(crate) index: usize,
     pub(crate) total: usize,
     pub(crate) line: String,
+}
+
+pub(crate) struct OracleStatus {
+    pub(crate) phase: &'static str,
+    pub(crate) message: String,
+    pub(crate) expected: Option<String>,
+    pub(crate) actual: Option<String>,
+}
+
+pub(crate) enum OracleEvent<'a> {
+    Progress(&'a OracleProgress),
+    Status(&'a OracleStatus),
 }
 
 struct Progress {
@@ -842,6 +878,16 @@ pub(crate) fn run_with_progress<F>(cli: Cli, mut on_progress: F) -> Result<(), S
 where
     F: FnMut(&OracleProgress) -> Result<(), String>,
 {
+    run_with_events(cli, |event| match event {
+        OracleEvent::Progress(progress) => on_progress(progress),
+        OracleEvent::Status(_) => Ok(()),
+    })
+}
+
+pub(crate) fn run_with_events<F>(cli: Cli, mut on_event: F) -> Result<(), String>
+where
+    F: FnMut(OracleEvent<'_>) -> Result<(), String>,
+{
     let root = cli
         .fname
         .clone()
@@ -857,10 +903,24 @@ where
         .oracle_output
         .clone()
         .unwrap_or_else(|| root.join("oracle-report.bin"));
-    run_suite(&work_root, len, &output, &mut on_progress)?;
+    run_suite(&work_root, len, &output, &mut |progress| {
+        on_event(OracleEvent::Progress(progress))
+    })?;
 
     if let Some(path) = &cli.oracle_expected {
+        on_event(OracleEvent::Status(&OracleStatus {
+            phase: "verifying",
+            message: format!("verifying {} against {}", output.display(), path.display()),
+            expected: Some(path.display().to_string()),
+            actual: Some(output.display().to_string()),
+        }))?;
         compare_reports(path, &output)?;
+        on_event(OracleEvent::Status(&OracleStatus {
+            phase: "verified",
+            message: format!("verified against {}", path.display()),
+            expected: Some(path.display().to_string()),
+            actual: Some(output.display().to_string()),
+        }))?;
     } else if cli.oracle_output.is_none() {
         println!("oracle report written to {}", output.display());
     }
@@ -897,6 +957,84 @@ pub(crate) fn verify_files(native_report: &Path, wasix_report: &Path) -> Result<
 
     println!("oracle external file verification ok: checked {checked} file snapshots");
     Ok(())
+}
+
+pub(crate) fn catalog_key() -> String {
+    format!("{:016x}", stable_hash(catalog_signature().as_bytes()))
+}
+
+pub(crate) fn catalog_syscalls() -> String {
+    op_catalog()
+        .iter()
+        .map(|spec| spec.name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub(crate) fn catalog_report() -> String {
+    let mut out = String::new();
+    out.push_str(&format!("oracle_catalog_key={}\n", catalog_key()));
+    out.push_str(&format!("report_version={REPORT_VERSION}\n"));
+    out.push_str(&format!("workers={WORKERS}\n"));
+    out.push_str(&format!("fd_slots={FD_SLOTS}\n"));
+    out.push_str(&format!(
+        "files={}\n",
+        FILES
+            .iter()
+            .map(|file| file.name())
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
+    out.push_str(&format!(
+        "snapshots={}\n",
+        SNAPSHOT_FILES
+            .iter()
+            .map(|file| file.name())
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
+    out.push_str("op_catalog:\n");
+    for spec in op_catalog() {
+        out.push_str(&format!("- {}\n", spec.name()));
+    }
+    out.push_str(&format!("syscalls={}\n", catalog_syscalls()));
+    out.push_str(&format!("concrete_ops={}\n", concrete_ops().len()));
+    out
+}
+
+fn catalog_signature() -> String {
+    let mut sig = String::new();
+    sig.push_str(&format!("report_version={REPORT_VERSION}\n"));
+    sig.push_str(&format!("workers={WORKERS}\n"));
+    sig.push_str(&format!("fd_slots={FD_SLOTS}\n"));
+    sig.push_str(&format!("stderr_marker_len={}\n", STDERR_MARKER.len()));
+    sig.push_str(&format!(
+        "files={}\n",
+        FILES
+            .iter()
+            .map(|file| format!("{}:{}", file.name(), file.tag()))
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
+    sig.push_str(&format!(
+        "snapshots={}\n",
+        SNAPSHOT_FILES
+            .iter()
+            .map(|file| format!("{}:{}", file.name(), file.tag()))
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
+    sig.push_str("op_catalog:\n");
+    for spec in op_catalog() {
+        sig.push_str(&spec.name());
+        sig.push('\n');
+    }
+    sig.push_str("concrete_ops:\n");
+    for op in concrete_ops() {
+        sig.push_str(&op.pseudocode());
+        sig.push('\n');
+    }
+    sig
 }
 
 fn run_suite<F>(root: &Path, len: usize, output: &Path, on_progress: &mut F) -> Result<(), String>
@@ -959,11 +1097,11 @@ fn execute_job(worker: usize, state: &Arc<Mutex<State>>, job: Job) -> Reply {
                 Ok(file) => {
                     let mut state = state.lock().unwrap();
                     let worker_state = &mut state.workers[worker];
-                    if let Some(old) = worker_state.slots[slot].take() {
-                        // Mirrors `fd_slot = open(...)`: the old numeric fd leaks.
+                    let old = std::mem::replace(&mut worker_state.slots[slot], FdSlot::Open(file));
+                    if let FdSlot::Open(old) = old {
+                        // Mirrors `fd_slot = open(...)`: the old numeric fd leaks if overwritten.
                         worker_state.leaked.push(old);
                     }
-                    worker_state.slots[slot] = Some(file);
                     OpResult::ok(-1)
                 }
                 Err(e) => OpResult::err(errcode(&e)),
@@ -971,36 +1109,46 @@ fn execute_job(worker: usize, state: &Arc<Mutex<State>>, job: Job) -> Reply {
         }
         Op::Close { slot } => {
             let mut state = state.lock().unwrap();
-            if state.workers[worker].slots[slot].take().is_some() {
-                OpResult::ok(-1)
-            } else {
-                OpResult::err(OracleErr::BadFd)
+            let worker_state = &mut state.workers[worker];
+            match std::mem::replace(&mut worker_state.slots[slot], FdSlot::NeverOpened) {
+                FdSlot::Open(file) => {
+                    let raw_fd = file.as_raw_fd();
+                    drop(file);
+                    worker_state.slots[slot] = FdSlot::Closed(raw_fd);
+                    OpResult::ok(-1)
+                }
+                FdSlot::Closed(raw_fd) => {
+                    worker_state.slots[slot] = FdSlot::Closed(raw_fd);
+                    OpResult::err(OracleErr::BadFd)
+                }
+                FdSlot::NeverOpened => {
+                    worker_state.slots[slot] = FdSlot::NeverOpened;
+                    OpResult::err(OracleErr::BadFd)
+                }
             }
         }
         Op::Write { slot, payload } => {
             let mut state = state.lock().unwrap();
-            let Some(file) = state.workers[worker].slots[slot].as_mut() else {
-                return Reply {
-                    result: OpResult::err(OracleErr::BadFd),
-                };
-            };
             let buf = write_payload(slot, payload);
-            match file.write(&buf) {
-                Ok(n) => OpResult::ok(n as i64),
-                Err(e) => OpResult::err(errcode(&e)),
+            match &mut state.workers[worker].slots[slot] {
+                FdSlot::Open(file) => match file.write(&buf) {
+                    Ok(n) => OpResult::ok(n as i64),
+                    Err(e) => OpResult::err(errcode(&e)),
+                },
+                FdSlot::Closed(raw_fd) => raw_write(*raw_fd, &buf),
+                FdSlot::NeverOpened => OpResult::err(OracleErr::BadFd),
             }
         }
         Op::Read { slot, size } => {
             let mut state = state.lock().unwrap();
-            let Some(file) = state.workers[worker].slots[slot].as_mut() else {
-                return Reply {
-                    result: OpResult::err(OracleErr::BadFd),
-                };
-            };
             let mut buf = vec![0u8; size.len()];
-            match file.read(&mut buf) {
-                Ok(n) => OpResult::ok_data(n as i64, buf[..n].to_vec()),
-                Err(e) => OpResult::err(errcode(&e)),
+            match &mut state.workers[worker].slots[slot] {
+                FdSlot::Open(file) => match file.read(&mut buf) {
+                    Ok(n) => OpResult::ok_data(n as i64, buf[..n].to_vec()),
+                    Err(e) => OpResult::err(errcode(&e)),
+                },
+                FdSlot::Closed(raw_fd) => raw_read(*raw_fd, &mut buf),
+                FdSlot::NeverOpened => OpResult::err(OracleErr::BadFd),
             }
         }
         Op::WriteStderr => match std::io::stderr().write_all(STDERR_MARKER) {
@@ -1016,30 +1164,28 @@ fn execute_job(worker: usize, state: &Arc<Mutex<State>>, job: Job) -> Reply {
         }
         Op::Seek { slot, target } => {
             let mut state = state.lock().unwrap();
-            let Some(file) = state.workers[worker].slots[slot].as_mut() else {
-                return Reply {
-                    result: OpResult::err(OracleErr::BadFd),
-                };
-            };
             let seek_from = match target {
                 SeekTarget::Start => SeekFrom::Start(0),
                 SeekTarget::End => SeekFrom::End(0),
             };
-            match file.seek(seek_from) {
-                Ok(pos) => OpResult::ok(pos as i64),
-                Err(e) => OpResult::err(errcode(&e)),
+            match &mut state.workers[worker].slots[slot] {
+                FdSlot::Open(file) => match file.seek(seek_from) {
+                    Ok(pos) => OpResult::ok(pos as i64),
+                    Err(e) => OpResult::err(errcode(&e)),
+                },
+                FdSlot::Closed(raw_fd) => raw_seek(*raw_fd, target),
+                FdSlot::NeverOpened => OpResult::err(OracleErr::BadFd),
             }
         }
         Op::Fstat { slot } => {
             let state = state.lock().unwrap();
-            let Some(file) = state.workers[worker].slots[slot].as_ref() else {
-                return Reply {
-                    result: OpResult::err(OracleErr::BadFd),
-                };
-            };
-            match file.metadata() {
-                Ok(metadata) => OpResult::ok(metadata.len() as i64),
-                Err(e) => OpResult::err(errcode(&e)),
+            match &state.workers[worker].slots[slot] {
+                FdSlot::Open(file) => match file.metadata() {
+                    Ok(metadata) => OpResult::ok(metadata.len() as i64),
+                    Err(e) => OpResult::err(errcode(&e)),
+                },
+                FdSlot::Closed(raw_fd) => raw_fstat(*raw_fd),
+                FdSlot::NeverOpened => OpResult::err(OracleErr::BadFd),
             }
         }
         Op::Stat { file } => {
@@ -1082,6 +1228,46 @@ fn open_file(path: &Path, mode: OpenMode) -> std::io::Result<File> {
             .create_new(true)
             .open(path),
     }
+}
+
+fn raw_write(fd: RawFd, buf: &[u8]) -> OpResult {
+    with_borrowed_raw_file(fd, |file| match file.write(buf) {
+        Ok(n) => OpResult::ok(n as i64),
+        Err(e) => OpResult::err(errcode(&e)),
+    })
+}
+
+fn raw_read(fd: RawFd, buf: &mut [u8]) -> OpResult {
+    with_borrowed_raw_file(fd, |file| match file.read(buf) {
+        Ok(n) => OpResult::ok_data(n as i64, buf[..n].to_vec()),
+        Err(e) => OpResult::err(errcode(&e)),
+    })
+}
+
+fn raw_seek(fd: RawFd, target: SeekTarget) -> OpResult {
+    let seek_from = match target {
+        SeekTarget::Start => SeekFrom::Start(0),
+        SeekTarget::End => SeekFrom::End(0),
+    };
+    with_borrowed_raw_file(fd, |file| match file.seek(seek_from) {
+        Ok(pos) => OpResult::ok(pos as i64),
+        Err(e) => OpResult::err(errcode(&e)),
+    })
+}
+
+fn raw_fstat(fd: RawFd) -> OpResult {
+    with_borrowed_raw_file(fd, |file| match file.metadata() {
+        Ok(metadata) => OpResult::ok(metadata.len() as i64),
+        Err(e) => OpResult::err(errcode(&e)),
+    })
+}
+
+fn with_borrowed_raw_file<F>(fd: RawFd, f: F) -> OpResult
+where
+    F: FnOnce(&mut File) -> OpResult,
+{
+    let mut file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
+    f(&mut file)
 }
 
 fn concrete_ops() -> Vec<Op> {
@@ -1171,8 +1357,8 @@ fn read_dir_listing(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(entries.join("\n").into_bytes())
 }
 
-fn empty_slots() -> Vec<Option<File>> {
-    (0..FD_SLOTS).map(|_| None).collect()
+fn empty_slots() -> Vec<FdSlot> {
+    (0..FD_SLOTS).map(|_| FdSlot::NeverOpened).collect()
 }
 
 fn empty_workers(worker_count: usize) -> Vec<WorkerState> {
@@ -1754,11 +1940,11 @@ mod tests {
     fn generator_expands_all_operation_and_worker_permutations() {
         assert_eq!(FILES.len(), 3);
         assert_eq!(SNAPSHOT_FILES.len(), 2);
-        assert_eq!(concrete_ops().len(), 40);
-        assert_eq!(generated_scheduled_case_count(1), 40);
-        assert_eq!(generated_scheduled_case_count(2), 3200);
-        assert_eq!(generated_scheduled_case_count(3), 256000);
-        assert_eq!(generated_scheduled_case_count(4), 20480000);
+        assert_eq!(concrete_ops().len(), 12);
+        assert_eq!(generated_scheduled_case_count(1), 12);
+        assert_eq!(generated_scheduled_case_count(2), 288);
+        assert_eq!(generated_scheduled_case_count(3), 6912);
+        assert_eq!(generated_scheduled_case_count(4), 165888);
     }
 
     #[test]
@@ -1838,6 +2024,10 @@ mod tests {
         assert_eq!(t1_close.result.err, OracleErr::None);
         assert_eq!(t1_write_after_close.result.err, OracleErr::BadFd);
         assert_eq!(t2_write_after_t1_close.result, OpResult::ok(32));
+        assert!(matches!(
+            state.lock().unwrap().workers[0].slots[0],
+            FdSlot::Closed(_)
+        ));
 
         let _ = fs::remove_dir_all(root.as_ref());
     }

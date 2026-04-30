@@ -74,8 +74,9 @@ fn handle_connection_result(
         ),
     )?;
 
-    let run_result = tester_oracle::run_with_progress(cli, |progress| {
-        send_text(
+    let run_result = tester_oracle::run_with_events(cli, |event| {
+        match event {
+        tester_oracle::OracleEvent::Progress(progress) => send_text(
             stream,
             &format!(
                 "{{\"type\":\"progress\",\"ok\":true,\"timestamp\":\"{}\",\"percent\":{:.2},\"index\":{},\"total\":{},\"line\":\"{}\"}}",
@@ -86,7 +87,19 @@ fn handle_connection_result(
                 json_escape(&progress.line)
             ),
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string()),
+        tester_oracle::OracleEvent::Status(status) => send_text(
+            stream,
+            &format!(
+                "{{\"type\":\"{}\",\"ok\":true,\"message\":\"{}\",\"expected\":{},\"actual\":{}}}",
+                status.phase,
+                json_escape(&status.message),
+                json_string(status.expected.as_deref()),
+                json_string(status.actual.as_deref())
+            ),
+        )
+        .map_err(|e| e.to_string()),
+    }
     });
 
     match run_result {
@@ -110,7 +123,7 @@ fn oracle_cli_from_params(
         .get("root")
         .or_else(|| params.get("cwd"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp/fsx-oracle-ws"));
+        .unwrap_or_else(|| PathBuf::from("/data/fsx-oracle-ws"));
 
     let mut cli = server_cli.clone();
     cli.server = None;
@@ -300,6 +313,13 @@ fn json_escape(s: &str) -> String {
         }
     }
     out
+}
+
+fn json_string(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("\"{}\"", json_escape(value)),
+        None => "null".to_owned(),
+    }
 }
 
 fn base64_encode(bytes: &[u8]) -> String {

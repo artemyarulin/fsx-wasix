@@ -110,6 +110,18 @@ pub(crate) struct Cli {
     )]
     pub(crate) oracle_verify_files: Option<Vec<PathBuf>>,
 
+    /// Print the active oracle operation catalog and cache key
+    #[arg(long = "oracle-catalog")]
+    pub(crate) oracle_catalog: bool,
+
+    /// Print only the active oracle cache key
+    #[arg(long = "oracle-catalog-key")]
+    pub(crate) oracle_catalog_key: bool,
+
+    /// Print a compact summary of enabled oracle I/O operations
+    #[arg(long = "oracle-catalog-syscalls")]
+    pub(crate) oracle_catalog_syscalls: bool,
+
     /// Orchestrated scenario name
     #[arg(long, default_value = "shared-inode")]
     pub(crate) scenario: String,
@@ -135,7 +147,7 @@ pub(crate) struct Cli {
     pub(crate) manifest: Option<PathBuf>,
 
     /// File name to operate on
-    #[arg(required_unless_present_any = ["server", "oracle_verify_files"])]
+    #[arg(required_unless_present_any = ["server", "oracle_verify_files", "oracle_catalog", "oracle_catalog_key", "oracle_catalog_syscalls"])]
     pub(crate) fname: Option<PathBuf>,
 
     /// Inject an error on step N
@@ -155,7 +167,13 @@ fn main() {
         .format_timestamp(None)
         .init();
     let config = cli.config.as_ref().map(Config::load).unwrap_or_default();
-    if let Some(reports) = &cli.oracle_verify_files {
+    if cli.oracle_catalog_key {
+        println!("{}", tester_oracle::catalog_key());
+    } else if cli.oracle_catalog_syscalls {
+        println!("{}", tester_oracle::catalog_syscalls());
+    } else if cli.oracle_catalog {
+        print!("{}", tester_oracle::catalog_report());
+    } else if let Some(reports) = &cli.oracle_verify_files {
         if let Err(e) = tester_oracle::verify_files(&reports[0], &reports[1]) {
             eprintln!("error: {e}");
             process::exit(1);

@@ -1,0 +1,21 @@
+[package]
+name = "artemyarulin/fsx-wasix"
+version = "0.20260429.183705"
+description = "Description for package fsx-wasix"
+readme = "README.md"
+
+[[module]]
+name = "fsx-wasix"
+source = "target/wasm32-wasmer-wasi/release/fsx-wasix.rustc.wasm"
+abi = "wasi"
+
+[module.interfaces]
+wasi = "0.1.0-unstable"
+
+[[command]]
+name = "fsx-wasix"
+module = "fsx-wasix"
+runner = "wasi"
+
+[fs]
+"/oracle" = "package-assets"
