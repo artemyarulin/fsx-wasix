@@ -63,20 +63,40 @@ fn handle_connection_result(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| format!("{root}/oracle-report.bin"));
     let chain_length = cli.numops.unwrap_or(2);
+    let case_start = cli.oracle_case_start.unwrap_or(1);
+    let case_count = cli.oracle_case_count.unwrap_or(0);
+    let sample_count = cli.oracle_sample_count.unwrap_or(0);
+    let sample_seed = cli.seed.unwrap_or(0);
 
     send_text(
         stream,
         &format!(
-            "{{\"type\":\"started\",\"ok\":true,\"root\":\"{}\",\"output\":\"{}\",\"chain_length\":{}}}",
+            "{{\"type\":\"started\",\"ok\":true,\"root\":\"{}\",\"output\":\"{}\",\"chain_length\":{},\"case_start\":{},\"case_count\":{},\"sample_count\":{},\"sample_seed\":{}}}",
             json_escape(&root),
             json_escape(&output),
-            chain_length
+            chain_length,
+            case_start,
+            case_count,
+            sample_count,
+            sample_seed
         ),
     )?;
 
     let run_result = tester_oracle::run_with_events(cli, |event| {
         match event {
         tester_oracle::OracleEvent::Progress(progress) => send_text(
+            stream,
+            &format!(
+                "{{\"type\":\"progress\",\"ok\":true,\"timestamp\":\"{}\",\"percent\":{:.2},\"index\":{},\"total\":{},\"line\":\"{}\"}}",
+                json_escape(&progress.timestamp),
+                progress.percent,
+                progress.index,
+                progress.total,
+                json_escape(&progress.line)
+            ),
+        )
+        .map_err(|e| e.to_string()),
+        tester_oracle::OracleEvent::VerifyProgress(progress) => send_text(
             stream,
             &format!(
                 "{{\"type\":\"progress\",\"ok\":true,\"timestamp\":\"{}\",\"percent\":{:.2},\"index\":{},\"total\":{},\"line\":\"{}\"}}",
@@ -150,6 +170,26 @@ fn oracle_cli_from_params(
         .or_else(|| params.get("expected"))
         .filter(|v| !v.trim().is_empty())
         .map(PathBuf::from);
+    cli.oracle_sample_count = param_parse::<usize>(params, "sample_count")?
+        .or(param_parse::<usize>(params, "oracle_sample_count")?)
+        .or(param_parse::<usize>(params, "oracle-sample-count")?);
+    cli.seed = param_parse::<u64>(params, "seed")?.or(param_parse::<u64>(params, "S")?);
+    cli.oracle_fixtures = params
+        .get("oracle_fixtures")
+        .or_else(|| params.get("fixtures"))
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
+    if cli.oracle_sample_count.is_some() {
+        cli.oracle_case_start = None;
+        cli.oracle_case_count = None;
+    } else {
+        cli.oracle_case_start = param_parse::<usize>(params, "case_start")?
+            .or(param_parse::<usize>(params, "case-start")?)
+            .or(param_parse::<usize>(params, "oracle_case_start")?);
+        cli.oracle_case_count = param_parse::<usize>(params, "case_count")?
+            .or(param_parse::<usize>(params, "case-count")?)
+            .or(param_parse::<usize>(params, "oracle_case_count")?);
+    }
     Ok(cli)
 }
 

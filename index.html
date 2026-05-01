@@ -14,22 +14,76 @@
         </div>
 
         <form id="run-form" class="space-y-5">
-          <input id="chain_length" name="chain_length" type="hidden" value="3" />
+          <input id="chain_length" name="chain_length" type="hidden" value="5" />
+          <input id="oracle_sample_count" name="oracle_sample_count" type="hidden" value="20000" />
 
           <div class="rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm">
             <div class="flex items-center justify-between gap-4">
               <span class="text-slate-400">Version</span>
-              <code id="build_version" class="text-cyan-300">0.20260429.183705</code>
+              <code id="build_version" class="text-cyan-300">0.20260501.124141</code>
             </div>
             <div class="mt-3">
               <div class="text-slate-400">Syscalls</div>
               <div id="syscall_summary" class="mt-2 text-xs leading-5 text-slate-300">
-                open(read_write_create), close, write(32_bytes:32), read(32_bytes:32)
+                close, open(append_create), open(read_write_create), read(32_bytes:32), write(32_bytes:32)
               </div>
             </div>
           </div>
 
-          <label class="block">
+          <div class="grid grid-cols-3 gap-2 rounded-xl border border-slate-800 bg-slate-950 p-1 text-sm">
+            <button
+              id="tab_sampling"
+              type="button"
+              class="rounded-lg bg-cyan-400 px-3 py-2 font-semibold text-slate-950"
+            >
+              Sampling
+            </button>
+            <button
+              id="tab_exhaustive"
+              type="button"
+              class="rounded-lg px-3 py-2 font-semibold text-slate-300 hover:bg-slate-900"
+            >
+              Exhaustive
+            </button>
+            <button
+              id="tab_trial1"
+              type="button"
+              class="rounded-lg px-3 py-2 font-semibold text-slate-300 hover:bg-slate-900"
+            >
+              Trial 1
+            </button>
+          </div>
+
+          <div id="sampling_panel" class="rounded-xl border border-slate-800 bg-slate-950 p-4">
+            <label class="block">
+              <span class="text-sm font-medium text-slate-300">Random samples</span>
+              <input
+                id="sample_count"
+                type="number"
+                min="1"
+                step="1"
+                value="20000"
+                class="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-cyan-400/40 focus:ring-4"
+              />
+            </label>
+            <label class="mt-4 block">
+              <span class="text-sm font-medium text-slate-300">Replay seed (optional)</span>
+              <input
+                id="sample_seed"
+                name="seed"
+                type="number"
+                min="0"
+                step="1"
+                placeholder="empty = generate new seed"
+                class="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-cyan-400/40 focus:ring-4"
+              />
+            </label>
+            <p class="mt-3 text-xs leading-5 text-slate-500">
+              Uses Len=3 and the bundled native oracle. Leave seed empty for a fresh run; paste a printed seed to replay the same sample.
+            </p>
+          </div>
+
+          <label id="oracle_preset_field" class="block">
             <span class="text-sm font-medium text-slate-300">Bundled native oracle</span>
             <select
               id="oracle_preset"
@@ -40,11 +94,11 @@
               <option value="2|/oracle/native-oracle-l2.bin">Len=2 native oracle</option>
               <option value="3|/oracle/native-oracle-l3.bin" selected>Len=3 native oracle</option>
               <option value="4|/oracle/native-oracle-l4.bin">Len=4 native oracle</option>
-              <option value="5|/oracle/native-oracle-l5.bin">Len=5 native oracle</option>
+              <option value="5|/oracle/native-oracle-l5.bin.gz">Len=5 native oracle</option>
             </select>
           </label>
 
-          <label class="block">
+          <label id="root_field" class="block">
             <span class="text-sm font-medium text-slate-300">Oracle root</span>
             <input
               id="root"
@@ -54,17 +108,17 @@
             />
           </label>
 
-          <label class="block">
+          <label id="output_field" class="block">
             <span class="text-sm font-medium text-slate-300">Output report</span>
             <input
               id="output"
               name="output"
-              value="/data/fsx-oracle-ws/oracle-report-l3-v0.20260429.183705.bin"
+              value="/data/fsx-oracle-ws/oracle-report-l3-v0.20260501.124141.bin"
               class="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-cyan-400/40 focus:ring-4"
             />
           </label>
 
-          <label class="block">
+          <label id="expected_field" class="block">
             <span class="text-sm font-medium text-slate-300">Expected report (optional)</span>
             <input
               id="expected"
@@ -74,6 +128,24 @@
               class="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-cyan-400/40 focus:ring-4"
             />
           </label>
+
+          <input id="case_start" name="case_start" type="hidden" value="1" />
+          <input id="case_count" name="case_count" type="hidden" />
+
+          <div id="shard_field" class="rounded-xl border border-slate-800 bg-slate-950 p-4">
+            <div class="mb-3 flex items-center justify-between gap-4">
+              <span class="text-sm font-medium text-slate-300">Shard</span>
+              <span id="shard_summary" class="text-xs text-slate-500">ALL cases</span>
+            </div>
+            <div id="shard_selector" class="grid grid-cols-4 gap-2 text-sm sm:grid-cols-6">
+              <label class="cursor-pointer">
+                <input class="peer sr-only" type="radio" name="shard_part" value="all" checked />
+                <span class="block rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-center text-slate-300 peer-checked:border-cyan-500 peer-checked:bg-cyan-400 peer-checked:font-semibold peer-checked:text-slate-950">
+                  ALL
+                </span>
+              </label>
+            </div>
+          </div>
 
           <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
             <div class="flex items-center justify-between text-sm">
@@ -102,14 +174,42 @@
       <section class="flex h-full min-h-0 w-1/2 flex-col overflow-hidden rounded-2xl border border-slate-800 bg-black shadow-2xl">
         <div class="shrink-0 flex items-center justify-between border-b border-slate-800 px-5 py-4">
           <div>
-            <h2 class="font-semibold">Progress Stream</h2>
-            <p class="text-sm text-slate-500">Messages from /wss</p>
+            <h2 class="font-semibold">Oracle Monitor</h2>
+            <p class="text-sm text-slate-500">Live progress and discovered mismatches</p>
           </div>
-          <button id="clear" class="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-900">
-            Clear
-          </button>
+          <div class="rounded-lg border border-slate-700 px-3 py-2 font-mono text-sm text-cyan-300">
+            <span class="text-slate-500">Run time</span>
+            <span id="run_time">0:00</span>
+          </div>
         </div>
-        <pre id="log" class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words p-5 font-mono text-sm leading-6 text-emerald-300"></pre>
+        <div class="shrink-0 border-b border-slate-800 p-5">
+          <div class="mb-2 text-xs uppercase tracking-[0.2em] text-slate-500">Last message</div>
+          <div
+            id="live_line"
+            class="h-10 truncate rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 font-mono text-sm leading-4 text-emerald-300"
+          >
+            Idle
+          </div>
+        </div>
+        <div class="flex min-h-0 flex-1 flex-col">
+          <div class="shrink-0 flex items-center justify-between border-b border-slate-800 px-5 py-4">
+            <div>
+              <h3 class="font-semibold">Mismatches</h3>
+              <p id="mismatch_count" class="text-sm text-slate-500">0 found</p>
+            </div>
+            <button
+              id="copy_mismatches"
+              type="button"
+              class="rounded-lg border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-300 transition hover:border-cyan-500 hover:text-cyan-300"
+            >
+              Copy
+            </button>
+          </div>
+          <pre
+            id="mismatch_log"
+            class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words p-5 font-mono text-sm leading-6 text-rose-200"
+          ></pre>
+        </div>
       </section>
     </main>
 
@@ -117,17 +217,48 @@
       const endpoint = document.getElementById("endpoint");
       const form = document.getElementById("run-form");
       const start = document.getElementById("start");
-      const log = document.getElementById("log");
+      const liveLine = document.getElementById("live_line");
+      const mismatchLog = document.getElementById("mismatch_log");
+      const mismatchCount = document.getElementById("mismatch_count");
+      const copyMismatches = document.getElementById("copy_mismatches");
       const status = document.getElementById("status");
       const counter = document.getElementById("counter");
       const bar = document.getElementById("bar");
-      const clear = document.getElementById("clear");
+      const runTime = document.getElementById("run_time");
+      let runStartedAt = null;
+      let runTimer = null;
+      let mismatchesFound = 0;
+      let currentMode = "sampling";
+      const tabSampling = document.getElementById("tab_sampling");
+      const tabExhaustive = document.getElementById("tab_exhaustive");
+      const tabTrial1 = document.getElementById("tab_trial1");
+      const samplingPanel = document.getElementById("sampling_panel");
+      const sampleCount = document.getElementById("sample_count");
+      const oracleSampleCount = document.getElementById("oracle_sample_count");
+      const exhaustiveFields = [
+        document.getElementById("oracle_preset_field"),
+        document.getElementById("root_field"),
+        document.getElementById("output_field"),
+        document.getElementById("expected_field"),
+        document.getElementById("shard_field"),
+      ];
       const oraclePreset = document.getElementById("oracle_preset");
       const chainLength = document.getElementById("chain_length");
       const expected = document.getElementById("expected");
       const root = document.getElementById("root");
       const output = document.getElementById("output");
       const buildVersion = document.getElementById("build_version");
+      const caseStart = document.getElementById("case_start");
+      const caseCount = document.getElementById("case_count");
+      const shardSelector = document.getElementById("shard_selector");
+      const shardSummary = document.getElementById("shard_summary");
+      const caseTotals = {
+        "1": 4,
+        "2": 72,
+        "3": 1636,
+        "4": 43248,
+        "5": 1261228,
+      };
 
       function wsUrl() {
         const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -136,9 +267,17 @@
 
       endpoint.textContent = wsUrl();
 
-      function append(line) {
-        log.textContent += `${line}\n`;
-        log.scrollTop = log.scrollHeight;
+      function setLiveLine(line) {
+        liveLine.textContent = line || "Idle";
+        liveLine.title = line || "Idle";
+      }
+
+      function appendMismatch(text) {
+        mismatchesFound += 1;
+        mismatchCount.textContent = `${mismatchesFound} found`;
+        const prefix = mismatchesFound === 1 ? "" : "\n\n";
+        mismatchLog.textContent += `${prefix}#${mismatchesFound}\n${text}`;
+        mismatchLog.scrollTop = mismatchLog.scrollHeight;
       }
 
       function setProgress(percent, index, total) {
@@ -146,25 +285,178 @@
         counter.textContent = `${index}/${total}`;
       }
 
+      function formatRunTime(ms) {
+        const totalSeconds = Math.floor(ms / 1000);
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = String(totalSeconds % 60).padStart(2, "0");
+        return `${minutes}:${seconds}`;
+      }
+
+      function updateRunTime() {
+        if (!runStartedAt) {
+          runTime.textContent = "0:00";
+          return;
+        }
+        runTime.textContent = formatRunTime(Date.now() - runStartedAt);
+      }
+
+      function startRunTimer() {
+        stopRunTimer();
+        runStartedAt = Date.now();
+        updateRunTime();
+        runTimer = setInterval(updateRunTime, 1000);
+      }
+
+      function stopRunTimer() {
+        if (runTimer) {
+          clearInterval(runTimer);
+          runTimer = null;
+        }
+        updateRunTime();
+      }
+
+      copyMismatches.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(mismatchLog.textContent);
+          setLiveLine("Copied mismatch log");
+        } catch {
+          setLiveLine("Could not copy mismatch log");
+        }
+      });
+
       function selectedLength() {
         return chainLength.value || "3";
+      }
+
+      function activeMode() {
+        return currentMode;
+      }
+
+      function storageKey(length = selectedLength()) {
+        return `fsx-oracle-shard-l${length}`;
       }
 
       function safeVersion() {
         return buildVersion.textContent.trim().replace(/[^A-Za-z0-9_.-]/g, "_");
       }
 
+      function selectedShardPart() {
+        return document.querySelector('input[name="shard_part"]:checked')?.value || "all";
+      }
+
+      function shardRange(length = selectedLength(), part = selectedShardPart()) {
+        const total = caseTotals[length];
+        if (!total || part === "all") {
+          return { start: 1, count: "", label: "ALL cases" };
+        }
+
+        const index = Number(part);
+        const start = Math.floor((total * (index - 1)) / 10) + 1;
+        const end = Math.floor((total * index) / 10);
+        return {
+          start,
+          count: end - start + 1,
+          label: `Part${index}: cases ${start}-${end} of ${total}`,
+        };
+      }
+
+      function applyShardSelection() {
+        const range = shardRange();
+        caseStart.value = String(range.start);
+        caseCount.value = range.count ? String(range.count) : "";
+        shardSummary.textContent = range.label;
+        refreshOutputPath();
+      }
+
+      function rememberShardSelection() {
+        try {
+          localStorage.setItem(storageKey(), selectedShardPart());
+        } catch {}
+      }
+
+      function restoreShardSelection() {
+        let saved = "all";
+        try {
+          saved = localStorage.getItem(storageKey()) || "all";
+        } catch {}
+        const input = shardSelector.querySelector(`input[name="shard_part"][value="${saved}"]`);
+        (input || shardSelector.querySelector('input[name="shard_part"][value="all"]')).checked = true;
+        applyShardSelection();
+      }
+
+      function addShardButton(value, label) {
+        const wrapper = document.createElement("label");
+        wrapper.className = "cursor-pointer";
+        wrapper.innerHTML = `
+          <input class="peer sr-only" type="radio" name="shard_part" value="${value}" />
+          <span class="block rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-center text-slate-300 peer-checked:border-cyan-500 peer-checked:bg-cyan-400 peer-checked:font-semibold peer-checked:text-slate-950">
+            ${label}
+          </span>
+        `;
+        shardSelector.appendChild(wrapper);
+      }
+
+      for (let part = 1; part <= 10; part += 1) {
+        addShardButton(String(part), `Part${part}`);
+      }
+
       function reportPath() {
         const base = root.value.replace(/\/+$/, "") || "/data/fsx-oracle-ws";
-        return `${base}/oracle-report-l${selectedLength()}-v${safeVersion()}.bin`;
+        if (activeMode() === "sampling") {
+          const samples = sampleCount.value.trim() || "20000";
+          return `${base}/oracle-sample-l3-n${samples}-v${safeVersion()}.bin`;
+        }
+        if (activeMode() === "trial1") {
+          const samples = sampleCount.value.trim() || "20000";
+          return `${base}/theory-trial-1-n${samples}-v${safeVersion()}.txt`;
+        }
+        const count = caseCount.value.trim();
+        const shard = count ? `-s${caseStart.value || "1"}-c${count}` : "";
+        return `${base}/oracle-report-l${selectedLength()}${shard}-v${safeVersion()}.bin`;
       }
 
       function refreshOutputPath() {
         output.value = reportPath();
       }
 
-      clear.addEventListener("click", () => {
-        log.textContent = "";
+      function setMode(mode) {
+        currentMode = mode;
+        const sampling = mode === "sampling";
+        const trial = mode === "trial1";
+        oracleSampleCount.value = sampling || trial ? (sampleCount.value.trim() || "20000") : "";
+        samplingPanel.classList.toggle("hidden", !(sampling || trial));
+        exhaustiveFields.forEach((el) => el.classList.toggle("hidden", sampling || trial));
+        tabSampling.className = sampling
+          ? "rounded-lg bg-cyan-400 px-3 py-2 font-semibold text-slate-950"
+          : "rounded-lg px-3 py-2 font-semibold text-slate-300 hover:bg-slate-900";
+        tabExhaustive.className = sampling
+          ? "rounded-lg px-3 py-2 font-semibold text-slate-300 hover:bg-slate-900"
+          : mode === "exhaustive"
+            ? "rounded-lg bg-cyan-400 px-3 py-2 font-semibold text-slate-950"
+            : "rounded-lg px-3 py-2 font-semibold text-slate-300 hover:bg-slate-900";
+        tabTrial1.className = trial
+          ? "rounded-lg bg-cyan-400 px-3 py-2 font-semibold text-slate-950"
+          : "rounded-lg px-3 py-2 font-semibold text-slate-300 hover:bg-slate-900";
+
+        if (sampling || trial) {
+          chainLength.value = trial ? "4" : "3";
+          expected.value = sampling ? "/oracle/native-oracle-l3.bin" : "";
+          caseStart.value = "1";
+          caseCount.value = "";
+        } else {
+          oraclePreset.dispatchEvent(new Event("change"));
+        }
+        refreshOutputPath();
+      }
+
+      tabSampling.addEventListener("click", () => setMode("sampling"));
+      tabExhaustive.addEventListener("click", () => setMode("exhaustive"));
+      tabTrial1.addEventListener("click", () => setMode("trial1"));
+      sampleCount.addEventListener("input", () => {
+        if (activeMode() === "sampling" || activeMode() === "trial1") {
+          oracleSampleCount.value = sampleCount.value.trim() || "20000";
+          refreshOutputPath();
+        }
       });
 
       oraclePreset.addEventListener("change", () => {
@@ -176,25 +468,48 @@
         const [length, path] = value.split("|");
         chainLength.value = length;
         expected.value = path;
-        refreshOutputPath();
+        restoreShardSelection();
       });
 
       root.addEventListener("change", refreshOutputPath);
       root.addEventListener("blur", refreshOutputPath);
-      refreshOutputPath();
+      shardSelector.addEventListener("change", () => {
+        rememberShardSelection();
+        applyShardSelection();
+      });
+      restoreShardSelection();
+      setMode("sampling");
 
       form.addEventListener("submit", (event) => {
         event.preventDefault();
-        log.textContent = "";
+        mismatchLog.textContent = "";
+        mismatchesFound = 0;
+        mismatchCount.textContent = "0 found";
+        setLiveLine("Connecting");
         setProgress(0, 0, 0);
         status.textContent = "Connecting";
         start.disabled = true;
+        startRunTimer();
+        if (activeMode() === "sampling" || activeMode() === "trial1") {
+          oracleSampleCount.value = sampleCount.value.trim() || "20000";
+        }
         refreshOutputPath();
 
         const socket = new WebSocket(wsUrl());
         socket.addEventListener("open", () => {
           const params = new URLSearchParams(new FormData(form));
-          append(`> start ${params.toString()}`);
+          if (activeMode() === "sampling" || activeMode() === "trial1") {
+            params.delete("case_start");
+            params.delete("case_count");
+            params.delete("shard_part");
+            if (activeMode() === "trial1") {
+              params.delete("expected");
+              params.delete("oracle_expected");
+            }
+          } else {
+            params.delete("seed");
+          }
+          setLiveLine(`start ${params.toString()}`);
           socket.send(params.toString());
         });
 
@@ -203,45 +518,58 @@
           try {
             message = JSON.parse(event.data);
           } catch {
-            append(event.data);
+            setLiveLine(event.data);
             return;
           }
 
           if (message.type === "ready") {
             status.textContent = "Connected";
+            setLiveLine("Connected");
           } else if (message.type === "started") {
-            status.textContent = `Running L=${message.chain_length}`;
-            append(`started root=${message.root} output=${message.output}`);
+            const sample = message.sample_count ? ` sample=${message.sample_count}` : "";
+            const seed = message.sample_seed ? ` seed=${message.sample_seed}` : "";
+            status.textContent = `Running L=${message.chain_length}${sample}`;
+            const shard = message.case_count ? ` start=${message.case_start} count=${message.case_count}` : "";
+            setLiveLine(`started root=${message.root} output=${message.output}${shard}${sample}${seed}`);
           } else if (message.type === "progress") {
             status.textContent = message.line;
             setProgress(message.percent, message.index, message.total);
-            append(message.line);
+            setLiveLine(message.line);
+          } else if (message.type === "sampling") {
+            status.textContent = "Sampling";
+            setLiveLine(message.message);
           } else if (message.type === "verifying") {
             status.textContent = "Verifying";
-            append(`verifying: ${message.actual} vs ${message.expected}`);
+            setLiveLine(`verifying: ${message.actual} vs ${message.expected}`);
           } else if (message.type === "verified") {
             status.textContent = "Verified";
-            append(`verified: ${message.expected}`);
+            setLiveLine(`verified: ${message.expected}`);
           } else if (message.type === "done") {
             status.textContent = "Done";
             setProgress(100, counter.textContent.split("/")[1] || 0, counter.textContent.split("/")[1] || 0);
-            append("done: ok");
+            setLiveLine("done: ok");
+            stopRunTimer();
           } else if (message.type === "error") {
             status.textContent = "Error";
-            append(`error: ${message.error}`);
+            setLiveLine("error: see mismatch log");
+            appendMismatch(message.error);
+            stopRunTimer();
           } else {
-            append(JSON.stringify(message));
+            setLiveLine(JSON.stringify(message));
           }
         });
 
         socket.addEventListener("close", () => {
           start.disabled = false;
-          append("> socket closed");
+          stopRunTimer();
+          setLiveLine("socket closed");
         });
 
         socket.addEventListener("error", () => {
           status.textContent = "Socket error";
-          append("error: websocket failed");
+          setLiveLine("socket error");
+          appendMismatch("websocket failed");
+          stopRunTimer();
         });
       });
     </script>

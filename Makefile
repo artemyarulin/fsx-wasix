@@ -1,12 +1,13 @@
 WASMER ?= wasmer
 REGISTRY ?= wasmer.io
 WASIX_ARTIFACT := target/wasm32-wasmer-wasi/release/fsx-wasix.rustc.wasm
-ORACLE_LENGTHS ?= 1 2 3 4 5
+ORACLE_LENGTHS ?= 1 2 3 4
+ORACLE_GZIP_LENGTHS ?= 5
 ORACLE_ASSET_DIR := package-assets
 ORACLE_CACHE_DIR := oracle-cache
 PACKAGE_OUT ?= /tmp/fsx-wasix-local.webc
 
-.PHONY: deploy build build-wasix bump-version update-index-metadata prepare-oracle-reports package-build
+.PHONY: deploy build build-wasix bump-version update-index-metadata prepare-oracle-reports prepare-theory-fixtures package-build
 
 deploy:
 	$(MAKE) prepare-oracle-reports
@@ -29,27 +30,55 @@ build-wasix:
 prepare-oracle-reports:
 	cargo build --release
 	mkdir -p "$(ORACLE_ASSET_DIR)" "$(ORACLE_CACHE_DIR)"
+	$(MAKE) prepare-theory-fixtures
+	rm -f "$(ORACLE_ASSET_DIR)"/native-oracle-l*.bin "$(ORACLE_ASSET_DIR)"/native-oracle-l*.bin.gz
 	set -eu; \
 	key="$$(cargo run --quiet -- --oracle-catalog-key)"; \
 	echo "oracle catalog key: $$key"; \
 	for len in $(ORACLE_LENGTHS); do \
 		cache="$(ORACLE_CACHE_DIR)/native-oracle-$$key-l$$len.bin"; \
 		asset="$(ORACLE_ASSET_DIR)/native-oracle-l$$len.bin"; \
+		tmp_cache="$$cache.tmp"; \
 		root="/tmp/fsx-native-oracle-$$key-l$$len"; \
 		if test -s "$$cache"; then \
 			echo "reuse $$cache -> $$asset"; \
 			cp "$$cache" "$$asset"; \
 		else \
 			echo "generate native oracle len=$$len -> $$cache"; \
+			rm -rf "$$root" "$$tmp_cache"; \
+			target/release/fsx-wasix --oracle -N "$$len" --oracle-output "$$tmp_cache" "$$root" 2>"$(ORACLE_CACHE_DIR)/native-oracle-$$key-l$$len.stderr.log"; \
+			mv "$$tmp_cache" "$$cache"; \
 			rm -rf "$$root"; \
-			target/release/fsx-wasix --oracle -N "$$len" --oracle-output "$$cache" "$$root"; \
+			cp "$$cache" "$$asset"; \
+		fi; \
+	done; \
+	for len in $(ORACLE_GZIP_LENGTHS); do \
+		cache="$(ORACLE_CACHE_DIR)/native-oracle-$$key-l$$len.bin.gz"; \
+		asset="$(ORACLE_ASSET_DIR)/native-oracle-l$$len.bin.gz"; \
+		tmp_cache="$$cache.tmp"; \
+		root="/tmp/fsx-native-oracle-$$key-l$$len"; \
+		if test -s "$$cache"; then \
+			echo "reuse $$cache -> $$asset"; \
+			cp "$$cache" "$$asset"; \
+		else \
+			echo "generate compressed native oracle len=$$len -> $$cache"; \
+			rm -rf "$$root" "$$tmp_cache"; \
+			target/release/fsx-wasix --oracle -N "$$len" --oracle-output "$$tmp_cache" "$$root" 2>"$(ORACLE_CACHE_DIR)/native-oracle-$$key-l$$len.stderr.log"; \
+			mv "$$tmp_cache" "$$cache"; \
 			rm -rf "$$root"; \
 			cp "$$cache" "$$asset"; \
 		fi; \
 	done
 
+prepare-theory-fixtures:
+	cargo build --release
+	mkdir -p "$(ORACLE_ASSET_DIR)" "$(ORACLE_CACHE_DIR)"
+	target/release/fsx-wasix --oracle-prepare-fixtures "$(ORACLE_CACHE_DIR)/theory-trial-1-fixtures"
+	rm -rf "$(ORACLE_ASSET_DIR)/theory-trial-1-fixtures"
+	cp -R "$(ORACLE_CACHE_DIR)/theory-trial-1-fixtures" "$(ORACLE_ASSET_DIR)/theory-trial-1-fixtures"
+
 bump-version:
-	python3 -c 'from pathlib import Path; import re, time; path = Path("wasmer.toml"); text = path.read_text(); version = time.strftime("0.%Y%m%d.%H%M%S", time.gmtime()); text, count = re.subn(r"(?m)^version = \"[^\"]+\"$$", f"version = \"{version}\"", text, count=1); assert count == 1, "failed to update package version in wasmer.toml"; path.write_text(text); print(f"wasmer.toml version = {version}")'
+	python3 -c 'from pathlib import Path; import re, time; path = Path("wasmer.toml"); text = path.read_text(); now = time.gmtime(); version = "0.%s.%d" % (time.strftime("%Y%m%d", now), int(time.strftime("%H%M%S", now))); text, count = re.subn(r"(?m)^version = \"[^\"]+\"$$", f"version = \"{version}\"", text, count=1); assert count == 1, "failed to update package version in wasmer.toml"; path.write_text(text); print(f"wasmer.toml version = {version}")'
 
 update-index-metadata:
 	python3 -c 'from pathlib import Path; import html, re, subprocess; toml = Path("wasmer.toml").read_text(); version = re.search(r"(?m)^version = \"([^\"]+)\"$$", toml).group(1); syscalls = subprocess.check_output(["target/release/fsx-wasix", "--oracle-catalog-syscalls"], text=True).strip(); path = Path("index.html"); text = path.read_text(); text = re.sub(r"(<code id=\"build_version\"[^>]*>).*?(</code>)", lambda m: m.group(1) + html.escape(version) + m.group(2), text, count=1, flags=re.S); text = re.sub(r"(<div id=\"syscall_summary\"[^>]*>).*?(</div>)", lambda m: m.group(1) + "\n                " + html.escape(syscalls) + "\n              " + m.group(2), text, count=1, flags=re.S); text = re.sub(r"(id=\"output\"[\s\S]*?value=\")[^\"]*(\")", rf"\1/data/fsx-oracle-ws/oracle-report-l3-v{html.escape(version)}.bin\2", text, count=1); path.write_text(text); print(f"index.html version = {version}"); print(f"index.html syscalls = {syscalls}")'

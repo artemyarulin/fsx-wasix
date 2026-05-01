@@ -94,6 +94,14 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) oracle: bool,
 
+    /// Generate deterministic theory trial fixture files into this directory
+    #[arg(long = "oracle-prepare-fixtures", value_name = "DIR")]
+    pub(crate) oracle_prepare_fixtures: Option<PathBuf>,
+
+    /// Directory containing deterministic theory trial fixture files
+    #[arg(long = "oracle-fixtures", value_name = "DIR")]
+    pub(crate) oracle_fixtures: Option<PathBuf>,
+
     /// Write oracle transcript to this path
     #[arg(long = "oracle-output")]
     pub(crate) oracle_output: Option<PathBuf>,
@@ -101,6 +109,18 @@ pub(crate) struct Cli {
     /// Compare oracle transcript against this path
     #[arg(long = "oracle-expected")]
     pub(crate) oracle_expected: Option<PathBuf>,
+
+    /// First deterministic oracle case id to run (1-based)
+    #[arg(long = "case-start")]
+    pub(crate) oracle_case_start: Option<usize>,
+
+    /// Number of deterministic oracle cases to run from --case-start
+    #[arg(long = "case-count")]
+    pub(crate) oracle_case_count: Option<usize>,
+
+    /// Random oracle case sample count (use -S to replay a specific sample seed)
+    #[arg(long = "oracle-sample-count")]
+    pub(crate) oracle_sample_count: Option<usize>,
 
     /// Re-read Wasmer volume files externally and compare them against native oracle snapshots
     #[arg(
@@ -147,7 +167,7 @@ pub(crate) struct Cli {
     pub(crate) manifest: Option<PathBuf>,
 
     /// File name to operate on
-    #[arg(required_unless_present_any = ["server", "oracle_verify_files", "oracle_catalog", "oracle_catalog_key", "oracle_catalog_syscalls"])]
+    #[arg(required_unless_present_any = ["server", "oracle_verify_files", "oracle_catalog", "oracle_catalog_key", "oracle_catalog_syscalls", "oracle_prepare_fixtures"])]
     pub(crate) fname: Option<PathBuf>,
 
     /// Inject an error on step N
@@ -167,7 +187,12 @@ fn main() {
         .format_timestamp(None)
         .init();
     let config = cli.config.as_ref().map(Config::load).unwrap_or_default();
-    if cli.oracle_catalog_key {
+    if let Some(path) = &cli.oracle_prepare_fixtures {
+        if let Err(e) = tester_oracle::prepare_theory_trial_fixtures(path) {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+    } else if cli.oracle_catalog_key {
         println!("{}", tester_oracle::catalog_key());
     } else if cli.oracle_catalog_syscalls {
         println!("{}", tester_oracle::catalog_syscalls());
